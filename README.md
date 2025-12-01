@@ -4,6 +4,9 @@ Personal app that provides essential online services without ads, algorithms, or
 This fork is an experimental implementation of a papyrus-like theme, is local-first for testing purposes, and caters to a broader audience.
 It's unstable and not production-ready.
 
+<img width="6000" height="900" alt="image" src="https://github.com/user-attachments/assets/38450e3b-dcec-4b6e-b663-6e911ed34b62" />
+
+
 Includes:
 
 - **Chat** - AI-powered assistant with contextual discussions
@@ -37,7 +40,7 @@ Let's rebuild these services without ads, algorithms or exploits for a better wa
 
 Starting with:
 
-- [/] Codex - use with ChatGPT subscription; avoid API $
+- [ ] Codex - use with ChatGPT subscription; avoid API $
 - [x] API - Basic API
 - [x] App - Basic PWA
 - [x] Home - Overview
