@@ -11,7 +11,7 @@ func TestHtmlToText(t *testing.T) {
 		{"Simple", "<p>Hello</p>", "Hello"},
 		{"Nested", "<div><p>Test</p></div>", "Test"},
 		{"Multiple Tags", "<p>One</p><p>Two</p>", "One Two"},
-		{"Attributes", `<a href="foo">Link</a>`, "Link"},
+		{"Attributes", `<a href="foo">Link</a>`, `<a href="foo" target="_blank" rel="noopener noreferrer">Link</a>`},
 		{"Empty", "", ""},
 	}
 

@@ -135,13 +135,13 @@ func updateCacheUnlocked() {
 
 		authorLink := post.Author
 		if post.AuthorID != "" {
-			authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #777;">%s</a>`, post.AuthorID, post.Author)
+			authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #666;">%s</a>`, post.AuthorID, post.Author)
 		}
 
 		item := fmt.Sprintf(`<div class="post-item">
 		<h3><a href="/post?id=%s" style="text-decoration: none; color: inherit;">%s</a></h3>
 		<div style="margin-bottom: 10px;">%s</div>
-		<div class="info" style="color: #777; font-size: small;">%s by %s · <a href="/post?id=%s" style="color: #777;">Link</a> · <a href="/chat?id=post_%s" style="color: #777;">Discuss</a></div>
+		<div class="info" style="color: #666; font-size: small;">%s by %s · <a href="/post?id=%s" style="color: #666;">Link</a> · <a href="/chat?id=post_%s" style="color: #666;">Discuss</a></div>
 	</div>`, post.ID, title, content, app.TimeAgo(post.CreatedAt), authorLink, post.ID, post.ID)
 		preview = append(preview, item)
 	}
@@ -185,13 +185,13 @@ func updateCacheUnlocked() {
 
 		authorLink := post.Author
 		if post.AuthorID != "" {
-			authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #777;">%s</a>`, post.AuthorID, post.Author)
+			authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #666;">%s</a>`, post.AuthorID, post.Author)
 		}
 
 		item := fmt.Sprintf(`<div class="post-item">
 			<h3><a href="/post?id=%s" style="text-decoration: none; color: inherit;">%s</a></h3>
 			<div style="margin-bottom: 10px;">%s</div>
-			<div class="info" style="color: #777; font-size: small;">%s by %s · <a href="/post?id=%s" style="color: #777;">Link</a> · <a href="/chat?id=post_%s" style="color: #777;">Discuss</a> · <a href="#" onclick="flagPost('%s'); return false;" style="color: #777;">Flag</a></div>
+			<div class="info" style="color: #666; font-size: small;">%s by %s · <a href="/post?id=%s" style="color: #666;">Link</a> · <a href="/chat?id=post_%s" style="color: #666;">Discuss</a> · <a href="#" onclick="flagPost('%s'); return false;" style="color: #666;">Flag</a></div>
 		</div>`, post.ID, title, content, app.TimeAgo(post.CreatedAt), authorLink, post.ID, post.ID, post.ID)
 		fullList = append(fullList, item)
 	}
@@ -256,13 +256,13 @@ func renderPostPreview(post *Post) string {
 
 	authorLink := post.Author
 	if post.AuthorID != "" {
-		authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #777;">%s</a>`, post.AuthorID, post.Author)
+		authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #666;">%s</a>`, post.AuthorID, post.Author)
 	}
 
 	item := fmt.Sprintf(`<div class="post-item">
 		<h3><a href="/post?id=%s" style="text-decoration: none; color: inherit;">%s</a></h3>
 		<div style="margin-bottom: 10px;">%s</div>
-		<div class="info" style="color: #777; font-size: small;">
+		<div class="info" style="color: #666; font-size: small;">
 			%s by %s
 			<span style="margin-left: 10px;">·</span>
 			<a href="/chat?id=post_%s" style="color: #0066cc; margin-left: 10px;">💬 Discuss</a>
@@ -277,7 +277,7 @@ func PostingForm(action string) string {
 	return fmt.Sprintf(`<div id="post-form-container">
 		<form id="post-form" method="POST" action="%s">
 			<input type="text" name="title" placeholder="Title (optional)">
-			<textarea name="content" rows="4" placeholder="Share a thought. Be mindful of God" required></textarea>
+			<textarea name="content" rows="4" placeholder="Share a thought. Be mindful of Allah" required></textarea>
 			<button type="submit">Post</button>
 		</form>
 	</div>`, action)
@@ -290,6 +290,21 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		mutex.RLock()
+		var visiblePosts []*Post
+		for _, post := range posts {
+			if !admin.IsHidden("post", post.ID) {
+				visiblePosts = append(visiblePosts, post)
+			}
+		}
+		mutex.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(visiblePosts)
+		return
+	}
+
 	mutex.RLock()
 	list := postsList
 	mutex.RUnlock()
@@ -299,15 +314,15 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		<div style="margin-bottom: 30px;">
 			<form id="blog-form" method="POST" action="/posts" style="display: flex; flex-direction: column; gap: 10px;">
 				<input type="text" name="title" placeholder="Title (optional)" style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px;">
-				<textarea id="post-content" name="content" rows="6" placeholder="Share a thought. Be mindful of God" required style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px; resize: vertical;"></textarea>
+				<textarea id="post-content" name="content" rows="6" placeholder="Share a thought. Be mindful of Allah" required style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px; resize: vertical;"></textarea>
 				<div style="display: flex; justify-content: space-between; align-items: center;">
-					<span id="char-count" style="font-size: 12px; color: #777;">Minimum 50 characters</span>
+					<span id="char-count" style="font-size: 12px; color: #666;">Minimum 50 characters</span>
 					<button type="submit" style="padding: 10px 20px; font-size: 14px; background-color: #333; color: white; border: none; border-radius: 5px; cursor: pointer;">Post</button>
 				</div>
 			</form>
 		</div>
 		<div style="margin-bottom: 15px;">
-			<a href="/moderate" style="color: #777; text-decoration: none; font-size: 14px;">Moderate</a>
+			<a href="/moderate" style="color: #666; text-decoration: none; font-size: 14px;">Moderate</a>
 		</div>
 		<hr style='margin: 0 0 30px 0; border: none; border-top: 2px solid #333;'>
 		<div id="posts-list">
@@ -319,11 +334,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
-// CreatePost creates a new post and returns error if any
-func CreatePost(title, content, author, authorID string) error {
+// CreatePost creates a new post and returns the ID plus any error.
+func CreatePost(title, content, author, authorID string) (string, error) {
 	// Create new post
+	id := fmt.Sprintf("%d", time.Now().UnixNano())
 	post := &Post{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:        id,
 		Title:     title,
 		Content:   content,
 		Author:    author,
@@ -338,13 +354,13 @@ func CreatePost(title, content, author, authorID string) error {
 
 	// Save to disk
 	if err := save(); err != nil {
-		return err
+		return "", err
 	}
 
 	// Update cached HTML
 	updateCache()
 
-	return nil
+	return id, nil
 }
 
 // GetPost retrieves a post by ID
@@ -416,6 +432,56 @@ func GetPostsByAuthor(authorName string) []*Post {
 // PostHandler serves individual blog posts (public, no auth required)
 func PostHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
+
+	// Handle POST to create a new post (no id required)
+	if r.Method == "POST" && id == "" {
+		isJSON := strings.Contains(r.Header.Get("Content-Type"), "application/json")
+
+		var title, content string
+		if isJSON {
+			var req struct {
+				Title   string `json:"title"`
+				Content string `json:"content"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON", http.StatusBadRequest)
+				return
+			}
+			title = strings.TrimSpace(req.Title)
+			content = strings.TrimSpace(req.Content)
+		} else {
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "Failed to parse form", http.StatusBadRequest)
+				return
+			}
+			title = strings.TrimSpace(r.FormValue("title"))
+			content = strings.TrimSpace(r.FormValue("content"))
+		}
+
+		if err := validatePostContent(content); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		postID, err := createPostFromValues(r, title, content)
+		if err != nil {
+			http.Error(w, "Failed to save post", http.StatusInternalServerError)
+			return
+		}
+
+		if isJSON {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"id":      postID,
+			})
+			return
+		}
+
+		http.Redirect(w, r, "/posts", http.StatusSeeOther)
+		return
+	}
+
 	if id == "" {
 		http.Redirect(w, r, "/posts", http.StatusFound)
 		return
@@ -423,7 +489,129 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 
 	post := GetPost(id)
 	if post == nil {
-		http.Error(w, "Post not found", 404)
+		http.Error(w, "Post not found", http.StatusNotFound)
+		return
+	}
+
+	// Handle PATCH - update the post
+	if r.Method == "PATCH" || (r.Method == "POST" && r.FormValue("_method") == "PATCH") {
+		isJSON := strings.Contains(r.Header.Get("Content-Type"), "application/json")
+
+		// Must be authenticated
+		sess, err := auth.GetSession(r)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		acc, err := auth.GetAccount(sess.Account)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if user is the author
+		if post.AuthorID != acc.ID {
+			http.Error(w, "Forbidden - you can only edit your own posts", http.StatusForbidden)
+			return
+		}
+
+		var title, content string
+
+		if isJSON {
+			var req struct {
+				Title   string `json:"title"`
+				Content string `json:"content"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "Invalid JSON", http.StatusBadRequest)
+				return
+			}
+			title = strings.TrimSpace(req.Title)
+			content = strings.TrimSpace(req.Content)
+		} else {
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, "Failed to parse form", http.StatusBadRequest)
+				return
+			}
+			title = strings.TrimSpace(r.FormValue("title"))
+			content = strings.TrimSpace(r.FormValue("content"))
+		}
+
+		if err := validatePostContent(content); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if err := UpdatePost(id, title, content); err != nil {
+			http.Error(w, "Failed to update post", http.StatusInternalServerError)
+			return
+		}
+
+		if isJSON {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"id":      id,
+			})
+			return
+		}
+
+		http.Redirect(w, r, "/post?id="+id, http.StatusSeeOther)
+		return
+	}
+
+	// GET - return JSON if requested
+	if r.Method == "GET" && strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(post)
+		return
+	}
+
+	// Check if edit mode is requested
+	if r.URL.Query().Get("edit") == "true" {
+		// Must be authenticated
+		sess, err := auth.GetSession(r)
+		if err != nil {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		acc, err := auth.GetAccount(sess.Account)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if user is the author
+		if post.AuthorID != acc.ID {
+			http.Error(w, "Forbidden - you can only edit your own posts", http.StatusForbidden)
+			return
+		}
+
+		// Show edit form
+		pageTitle := "Edit Post"
+		if post.Title != "" {
+			pageTitle = "Edit: " + post.Title
+		}
+
+		content := fmt.Sprintf(`<div id="blog">
+			<form method="POST" action="/post?id=%s" style="display: flex; flex-direction: column; gap: 10px;">
+				<input type="hidden" name="_method" value="PATCH">
+				<input type="text" name="title" placeholder="Title (optional)" value="%s" style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px;">
+				<textarea name="content" rows="15" required style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px; resize: vertical; font-family: monospace;">%s</textarea>
+				<div style="font-size: 12px; color: #666; margin-top: -5px;">
+					Supports markdown: **bold**, *italic*, `+"`code`"+`, `+"```"+` for code blocks, # headers, - lists
+				</div>
+				<div style="display: flex; gap: 10px;">
+					<button type="submit" style="padding: 10px 20px; font-size: 14px; background-color: #333; color: white; border: none; border-radius: 5px; cursor: pointer;">Save Changes</button>
+					<a href="/post?id=%s" style="padding: 10px 20px; font-size: 14px; background-color: #ccc; color: #333; text-decoration: none; border-radius: 5px; display: inline-block;">Cancel</a>
+				</div>
+			</form>
+		</div>`, post.ID, post.Title, post.Content, post.ID)
+
+		html := app.RenderHTMLForRequest(pageTitle, "", content, r)
+		w.Write([]byte(html))
 		return
 	}
 
@@ -437,7 +625,7 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 
 	authorLink := post.Author
 	if post.AuthorID != "" {
-		authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #777;">%s</a>`, post.AuthorID, post.Author)
+		authorLink = fmt.Sprintf(`<a href="/@%s" style="color: #666;">%s</a>`, post.AuthorID, post.Author)
 	}
 
 	// Check if current user is the author (to show edit button)
@@ -446,13 +634,13 @@ func PostHandler(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		acc, err := auth.GetAccount(sess.Account)
 		if err == nil && acc.ID == post.AuthorID {
-			editButton = ` · <a href="/post/edit?id=` + post.ID + `" style="color: #777;">Edit</a>`
+			editButton = ` · <a href="/post?id=` + post.ID + `&edit=true" style="color: #666;">Edit</a>`
 		}
 	}
 
 	content := fmt.Sprintf(`<div id="blog">
-		<div class="info" style="color: #777; font-size: small;">
-			%s by %s · <a href="/chat?id=post_%s" style="color: #777;">Discuss</a>%s · <a href="#" onclick="flagPost('%s'); return false;" style="color: #777;">Flag</a>
+		<div class="info" style="color: #666; font-size: small;">
+			%s by %s · <a href="/chat?id=post_%s" style="color: #666;">Discuss</a>%s · <a href="#" onclick="flagPost('%s'); return false;" style="color: #666;">Flag</a>
 		</div>
 		<hr style='margin: 20px 0; border: none; border-top: 1px solid #eee;'>
 		<div style="margin-bottom: 20px;">%s</div>
@@ -480,91 +668,13 @@ func min(a, b int) int {
 
 // EditHandler serves the post edit form
 func EditHandler(w http.ResponseWriter, r *http.Request) {
-	// Must be authenticated
-	sess, err := auth.GetSession(r)
-	if err != nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-
-	acc, err := auth.GetAccount(sess.Account)
-	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Redirect(w, r, "/posts", http.StatusSeeOther)
 		return
 	}
 
-	post := GetPost(id)
-	if post == nil {
-		http.Error(w, "Post not found", http.StatusNotFound)
-		return
-	}
-
-	// Check if user is the author
-	if post.AuthorID != acc.ID {
-		http.Error(w, "Forbidden - you can only edit your own posts", http.StatusForbidden)
-		return
-	}
-
-	// Handle POST - update the post
-	if r.Method == "POST" {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "Failed to parse form", http.StatusBadRequest)
-			return
-		}
-
-		title := strings.TrimSpace(r.FormValue("title"))
-		content := strings.TrimSpace(r.FormValue("content"))
-
-		if content == "" {
-			http.Error(w, "Content is required", http.StatusBadRequest)
-			return
-		}
-
-		// Same validation as creating a post
-		// Allow URLs to pass through without length check
-		hasURL := strings.Contains(content, "http://") || strings.Contains(content, "https://")
-		if !hasURL && len(content) < 50 {
-			http.Error(w, "Post content must be at least 50 characters", http.StatusBadRequest)
-			return
-		}
-
-		if err := UpdatePost(id, title, content); err != nil {
-			http.Error(w, "Failed to update post", http.StatusInternalServerError)
-			return
-		}
-
-		http.Redirect(w, r, "/post?id="+id, http.StatusSeeOther)
-		return
-	}
-
-	// GET - show edit form
-	pageTitle := "Edit Post"
-	if post.Title != "" {
-		pageTitle = "Edit: " + post.Title
-	}
-
-	content := fmt.Sprintf(`<div id="blog">
-		<form method="POST" action="/post/edit?id=%s" style="display: flex; flex-direction: column; gap: 10px;">
-			<input type="text" name="title" placeholder="Title (optional)" value="%s" style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px;">
-			<textarea name="content" rows="15" required style="padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 5px; resize: vertical; font-family: monospace;">%s</textarea>
-			<div style="font-size: 12px; color: #777; margin-top: -5px;">
-				Supports markdown: **bold**, *italic*, `+"`code`"+`, `+"```"+` for code blocks, # headers, - lists
-			</div>
-			<div style="display: flex; gap: 10px;">
-				<button type="submit" style="padding: 10px 20px; font-size: 14px; background-color: #333; color: white; border: none; border-radius: 5px; cursor: pointer;">Save Changes</button>
-				<a href="/post?id=%s" style="padding: 10px 20px; font-size: 14px; background-color: #ccc; color: #333; text-decoration: none; border-radius: 5px; display: inline-block;">Cancel</a>
-			</div>
-		</form>
-	</div>`, post.ID, post.Title, post.Content, post.ID)
-
-	html := app.RenderHTMLForRequest(pageTitle, "", content, r)
-	w.Write([]byte(html))
+	http.Redirect(w, r, "/post?id="+id+"&edit=true", http.StatusSeeOther)
 }
 
 // RenderMarkdown converts markdown to HTML without embeds (for storage/previews)
@@ -606,27 +716,19 @@ func Linkify(text string) string {
 	return text
 }
 
-func handlePost(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Failed to parse form", http.StatusBadRequest)
-		return
-	}
-
-	title := strings.TrimSpace(r.FormValue("title"))
-	content := strings.TrimSpace(r.FormValue("content"))
-
+func validatePostContent(content string) error {
+	content = strings.TrimSpace(content)
 	if content == "" {
-		http.Error(w, "Content is required", http.StatusBadRequest)
-		return
+		return fmt.Errorf("Content is required")
 	}
 
-	// Content validation: minimum length
 	if len(content) < 50 {
-		http.Error(w, "Post content must be at least 50 characters", http.StatusBadRequest)
-		return
+		hasURL := strings.Contains(content, "http://") || strings.Contains(content, "https://")
+		if !hasURL {
+			return fmt.Errorf("Post content must be at least 50 characters")
+		}
 	}
 
-	// Spam detection: check for common test patterns
 	contentLower := strings.ToLower(content)
 	spamPatterns := []string{
 		"this is a test",
@@ -639,33 +741,24 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 
 	for _, pattern := range spamPatterns {
 		if strings.Contains(contentLower, pattern) && len(content) < 100 {
-			http.Error(w, "Post appears to be test content. Please share something meaningful.", http.StatusBadRequest)
-			return
+			return fmt.Errorf("Post appears to be test content. Please share something meaningful.")
 		}
 	}
 
-	// Advanced spam detection: check for low-quality content
-	// Allow URLs to pass through
 	hasURL := strings.Contains(content, "http://") || strings.Contains(content, "https://")
 	if !hasURL {
-		// Count words
 		wordCount := len(strings.Fields(content))
-
-		// Require at least 3 words/spaces for non-URL content
 		if wordCount < 3 {
-			http.Error(w, "Post must contain at least 3 words. Share something meaningful.", http.StatusBadRequest)
-			return
+			return fmt.Errorf("Post must contain at least 3 words. Share something meaningful.")
 		}
 
-		// Check for excessive repeated characters (e.g., "aaaaaa" or "asdfasdfasdf")
 		repeatedChars := 0
 		lastChar := rune(0)
 		for _, char := range content {
 			if char == lastChar && char != ' ' && char != '\n' {
 				repeatedChars++
 				if repeatedChars > 4 {
-					http.Error(w, "Post contains too many repeated characters. Please share something meaningful.", http.StatusBadRequest)
-					return
+					return fmt.Errorf("Post contains too many repeated characters. Please share something meaningful.")
 				}
 			} else {
 				repeatedChars = 0
@@ -673,7 +766,6 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 			lastChar = char
 		}
 
-		// Check character diversity (should have at least 10 unique characters for 50+ char posts)
 		uniqueChars := make(map[rune]bool)
 		for _, char := range strings.ToLower(content) {
 			if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') {
@@ -681,33 +773,54 @@ func handlePost(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if len(uniqueChars) < 10 {
-			http.Error(w, "Post lacks character diversity. Please share something meaningful.", http.StatusBadRequest)
-			return
+			return fmt.Errorf("Post lacks character diversity. Please share something meaningful.")
 		}
 	}
 
-	// Get the authenticated user
+	return nil
+}
+
+func createPostFromValues(r *http.Request, title, content string) (string, error) {
+	if err := validatePostContent(content); err != nil {
+		return "", err
+	}
+
 	author := "Anonymous"
 	authorID := ""
-	sess, err := auth.GetSession(r)
-	if err == nil {
-		acc, err := auth.GetAccount(sess.Account)
-		if err == nil {
+	if sess, err := auth.GetSession(r); err == nil {
+		if acc, err := auth.GetAccount(sess.Account); err == nil {
 			author = acc.Name
 			authorID = acc.ID
 		}
 	}
 
-	// Create the post
-	postID := fmt.Sprintf("%d", time.Now().UnixNano())
-	if err := CreatePost(title, content, author, authorID); err != nil {
+	postID, err := CreatePost(title, content, author, authorID)
+	if err != nil {
+		return "", err
+	}
+
+	go admin.CheckContent("post", postID, title, content)
+	return postID, nil
+}
+
+func handlePost(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Failed to parse form", http.StatusBadRequest)
+		return
+	}
+
+	title := strings.TrimSpace(r.FormValue("title"))
+	content := strings.TrimSpace(r.FormValue("content"))
+
+	if err := validatePostContent(content); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if _, err := createPostFromValues(r, title, content); err != nil {
 		http.Error(w, "Failed to save post", http.StatusInternalServerError)
 		return
 	}
 
-	// Run async LLM-based content moderation (non-blocking)
-	go admin.CheckContent("post", postID, title, content)
-
-	// Redirect back to posts page
 	http.Redirect(w, r, "/posts", http.StatusSeeOther)
 }

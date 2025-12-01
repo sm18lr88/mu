@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -65,9 +66,12 @@ func getYouTubeClient() (*youtube.Service, error) {
 	prevKey := lastKey
 	clientMu.RUnlock()
 
-	key := strings.TrimSpace(config.Get().YouTubeAPIKey)
+	key := strings.TrimSpace(os.Getenv("YOUTUBE_API_KEY"))
 	if key == "" {
-		return nil, fmt.Errorf("YouTube API key not set (add one in Settings)")
+		key = strings.TrimSpace(config.Get().YouTubeAPIKey)
+	}
+	if key == "" {
+		return nil, fmt.Errorf("YouTube API key not set (set YOUTUBE_API_KEY or add one in Settings)")
 	}
 
 	// If key changed, drop cached client
@@ -331,9 +335,9 @@ func loadChannels() {
 	// unpack into feeds
 	mutex.Lock()
 	if err := json.Unmarshal(data, &channels); err != nil {
-		fmt.Println("Error parsing channels.json", err)
+		app.Log("video", "Error parsing channels.json: %v", err)
 	}
-	// Temporarily drop faith-specific channels until we can include a broader set of moral/ethical traditions.
+	// Temporarily drop faith-specific channels until we can include a broader set of traditions.
 	for name := range channels {
 		if strings.Contains(strings.ToLower(name), "islam") {
 			delete(channels, name)
@@ -363,11 +367,11 @@ func Load() {
 }
 
 func loadVideos() {
-	fmt.Println("Loading videos")
+	app.Log("video", "Loading videos")
 
 	youtubeClient, err := getYouTubeClient()
 	if err != nil {
-		fmt.Println("Video refresh skipped:", err)
+		app.Log("video", "Video refresh skipped: %v", err)
 		time.Sleep(time.Hour)
 		go loadVideos()
 		return
@@ -390,7 +394,7 @@ func loadVideos() {
 	for channel, handle := range chans {
 		html, res, err := getChannel(youtubeClient, channel, handle)
 		if err != nil {
-			fmt.Println("Error getting channel", channel, handle, err)
+			app.Log("video", "Error getting channel %s (%s): %v", channel, handle, err)
 			continue
 		}
 		if len(res) == 0 {
@@ -413,7 +417,7 @@ func loadVideos() {
 	// If we failed to collect any videos (e.g., missing API key/client),
 	// keep existing cached data and try again later instead of crashing.
 	if len(latest) == 0 {
-		fmt.Println("No video results loaded; skipping refresh")
+		app.Log("video", "No video results loaded; skipping refresh")
 		time.Sleep(time.Hour)
 		go loadVideos()
 		return
@@ -483,8 +487,8 @@ func getChannel(youtubeClient *youtube.Service, category, handle string) (string
 	uploadsPlaylistID := channel.ContentDetails.RelatedPlaylists.Uploads
 	channelID := channel.Id
 
-	fmt.Printf("Channel ID for @%s: %s\n", handle, channelID)
-	fmt.Printf("Uploads Playlist ID: %s\n", uploadsPlaylistID)
+	app.Log("video", "Channel ID for @%s: %s", handle, channelID)
+	app.Log("video", "Uploads Playlist ID: %s", uploadsPlaylistID)
 
 	listVideosCall := youtubeClient.PlaylistItems.List([]string{"id", "snippet"}).PlaylistId(uploadsPlaylistID).MaxResults(25)
 	resp, err := listVideosCall.Do()

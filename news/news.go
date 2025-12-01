@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime/debug"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"mu/app"
 	"mu/config"
@@ -97,52 +99,68 @@ type Metadata struct {
 	Content     string
 }
 
-// htmlToText converts HTML to plain text with proper spacing
+// htmlToText converts HTML to plain text with proper spacing and preserved links.
 func htmlToText(html string) string {
 	if html == "" {
 		return ""
 	}
 
-	// Parse HTML
 	doc, err := nethtml.Parse(strings.NewReader(html))
 	if err != nil {
-		// If parsing fails, just strip tags the simple way
 		re := regexp.MustCompile(`<[^>]*>`)
 		text := re.ReplaceAllString(html, " ")
-		// Collapse multiple spaces
 		re2 := regexp.MustCompile(`\s+`)
 		return strings.TrimSpace(re2.ReplaceAllString(text, " "))
 	}
 
 	var sb strings.Builder
 	var extract func(*nethtml.Node)
+
 	extract = func(n *nethtml.Node) {
 		if n.Type == nethtml.TextNode {
 			sb.WriteString(n.Data)
 		}
 		if n.Type == nethtml.ElementNode {
-			// Process children first
-			for c := n.FirstChild; c != nil; c = c.NextSibling {
-				extract(c)
-			}
-			// Add space after block elements
-			switch n.Data {
-			case "br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "a":
+			if n.Data == "a" {
+				var href string
+				for _, attr := range n.Attr {
+					if attr.Key == "href" {
+						href = attr.Val
+						break
+					}
+				}
+				if href != "" {
+					sb.WriteString(`<a href="`)
+					sb.WriteString(href)
+					sb.WriteString(`" target="_blank" rel="noopener noreferrer">`)
+				}
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					extract(c)
+				}
+				if href != "" {
+					sb.WriteString("</a>")
+				}
 				sb.WriteString(" ")
+			} else {
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					extract(c)
+				}
+				switch n.Data {
+				case "br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6":
+					sb.WriteString(" ")
+				}
 			}
 		} else {
-			// For non-element nodes, process children
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				extract(c)
 			}
 		}
 	}
+
 	extract(doc)
 
-	// Collapse multiple spaces and trim
-	text := sb.String()
 	re := regexp.MustCompile(`\s+`)
-	return strings.TrimSpace(re.ReplaceAllString(text, " "))
+	return strings.TrimSpace(re.ReplaceAllString(sb.String(), " "))
 }
 
 func getDomain(v string) string {
@@ -163,12 +181,8 @@ func getDomain(v string) string {
 		return host
 	}
 
-	parts := strings.Split(host, ".")
-	if len(parts) == 2 {
-		return host
-	} else if len(parts) == 3 {
-		return strings.Join(parts[1:3], ".")
-	}
+	host = strings.TrimPrefix(host, "www.")
+
 	return host
 }
 
@@ -188,10 +202,10 @@ func getSummary(post *Post) string {
 }
 
 func getPrices() map[string]float64 {
-	fmt.Println("Getting prices")
+	app.Log("news", "Getting prices")
 	rsp, err := http.Get("https://api.coinbase.com/v2/exchange-rates?currency=USD")
 	if err != nil {
-		fmt.Println("Error getting prices", err)
+		app.Log("news", "Error getting prices: %v", err)
 		return nil
 	}
 	b, _ := io.ReadAll(rsp.Body)
@@ -220,17 +234,17 @@ func getPrices() map[string]float64 {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					fmt.Printf("Recovered from panic getting future %s (%s): %v\n", key, ftr, r)
+					app.Log("news", "Recovered from panic getting future %s (%s): %v", key, ftr, r)
 				}
 			}()
 
 			f, err := future.Get(ftr)
 			if err != nil {
-				fmt.Println("Failed to get future", key, ftr, err)
+				app.Log("news", "Failed to get future %s (%s): %v", key, ftr, err)
 				return
 			}
 			if f == nil {
-				fmt.Println("Future returned nil for", key, ftr)
+				app.Log("news", "Future returned nil for %s (%s)", key, ftr)
 				return
 			}
 			// Access the price, which may panic if Quote struct is malformed
@@ -241,6 +255,7 @@ func getPrices() map[string]float64 {
 		}()
 	}
 
+	app.Log("news", "Finished getting all prices")
 	return prices
 }
 
@@ -260,23 +275,84 @@ var futures = map[string]string{
 
 var futuresKeys = []string{"OIL", "OATS", "COFFEE", "WHEAT", "GOLD"}
 
-var replace = []func(string) string{
-	func(v string) string {
-		return strings.Replace(v, "© 2025 TechCrunch. All rights reserved. For personal use only.", "", -1)
+// ContentParser functions clean up feed descriptions
+type ContentParser struct {
+	Name      string
+	FeedNames []string // Apply to these feeds only (empty = all feeds)
+	Parse     func(string) string
+}
+
+var contentParsers = []ContentParser{
+	{
+		Name:      "Strip HackerNews Comments-Only Descriptions",
+		FeedNames: []string{"Hacker News", "Dev"},
+		Parse: func(desc string) string {
+			desc = strings.TrimSpace(desc)
+			desc = strings.TrimPrefix(desc, "<![CDATA[")
+			desc = strings.TrimSuffix(desc, "]]>")
+			desc = strings.TrimSpace(desc)
+
+			if strings.HasPrefix(desc, `<a href="https://news.ycombinator.com/item?id=`) &&
+				strings.HasSuffix(desc, `">Comments</a>`) {
+				return ""
+			}
+
+			if desc == "Comments" {
+				return ""
+			}
+
+			return desc
+		},
 	},
-	func(v string) string {
-		return regexp.MustCompile(`<img .*>`).ReplaceAllString(v, "")
+	{
+		Name: "Strip TechCrunch Copyright",
+		Parse: func(desc string) string {
+			return strings.Replace(desc, "© 2025 TechCrunch. All rights reserved. For personal use only.", "", -1)
+		},
 	},
-	func(v string) string {
-		parts := strings.Split(v, "</p>")
-		if len(parts) > 0 {
-			return strings.Replace(parts[0], "<p>", "", 1)
+	{
+		Name: "Remove Images",
+		Parse: func(desc string) string {
+			return regexp.MustCompile(`<img .*>`).ReplaceAllString(desc, "")
+		},
+	},
+	{
+		Name: "Extract First Paragraph",
+		Parse: func(desc string) string {
+			parts := strings.Split(desc, "</p>")
+			if len(parts) > 0 {
+				return strings.Replace(parts[0], "<p>", "", 1)
+			}
+			return desc
+		},
+	},
+	{
+		Name: "Sanitize HTML",
+		Parse: func(desc string) string {
+			return sanitize.HTML(desc)
+		},
+	},
+}
+
+// applyContentParsers applies all relevant parsers to a description
+func applyContentParsers(desc string, feedName string) string {
+	for _, parser := range contentParsers {
+		if len(parser.FeedNames) > 0 {
+			matched := false
+			for _, name := range parser.FeedNames {
+				if name == feedName {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
-		return v
-	},
-	func(v string) string {
-		return sanitize.HTML(v)
-	},
+
+		desc = parser.Parse(desc)
+	}
+	return desc
 }
 
 func saveHtml(head, content []byte) {
@@ -307,7 +383,7 @@ func loadFeed() {
 	if bytes == nil {
 		bytes, err = f.ReadFile("feeds.json")
 		if err != nil {
-			fmt.Println("Error reading embedded feeds.json:", err)
+			app.Log("news", "Error reading embedded feeds.json: %v", err)
 		}
 	}
 	if bytes == nil {
@@ -321,7 +397,7 @@ func loadFeed() {
 	feeds = make(map[string]map[string]string)
 
 	if err := json.Unmarshal(bytes, &feeds); err != nil {
-		fmt.Println("Error parsing feeds.json", err)
+		app.Log("news", "Error parsing feeds.json: %v", err)
 	}
 
 	// Filter sources based on settings
@@ -409,7 +485,33 @@ func ensureFeedsFresh() {
 	}
 }
 
+func getMetadataPath(uri string) string {
+	itemID := fmt.Sprintf("%x", md5.Sum([]byte(uri)))[:16]
+	return filepath.Join("news", "metadata", itemID+".json")
+}
+
+func loadCachedMetadata(uri string) (*Metadata, bool) {
+	path := getMetadataPath(uri)
+	var md Metadata
+	if err := data.LoadJSON(path, &md); err != nil {
+		return nil, false
+	}
+	return &md, true
+}
+
+func saveCachedMetadata(uri string, md *Metadata) {
+	path := getMetadataPath(uri)
+	if err := data.SaveJSON(path, md); err != nil {
+		app.Log("news", "Error saving metadata: %v", err)
+	}
+}
+
 func getMetadata(uri string) (*Metadata, error) {
+	// Check cache first
+	if cached, exists := loadCachedMetadata(uri); exists {
+		return cached, nil
+	}
+
 	u, err := url.Parse(uri)
 	if err != nil {
 		return nil, err
@@ -425,84 +527,122 @@ func getMetadata(uri string) (*Metadata, error) {
 		Url:     uri,
 	}
 
-	firstNonEmpty := func(values ...string) string {
-		for _, v := range values {
-			if s := strings.TrimSpace(v); s != "" {
-				return s
-			}
+	check := func(p []string) bool {
+		if p[0] == "twitter" {
+			return true
 		}
-		return ""
-	}
-
-	metaContent := func(attr, val string) string {
-		if s, ok := d.Find(fmt.Sprintf("meta[%s=\"%s\"]", attr, val)).Attr("content"); ok {
-			return strings.TrimSpace(s)
+		if p[0] == "og" {
+			return true
 		}
-		return ""
+
+		return false
 	}
 
-	// Prefer OpenGraph/Twitter metadata first
-	g.Title = firstNonEmpty(
-		metaContent("property", "og:title"),
-		metaContent("name", "twitter:title"),
-		d.Find("title").First().Text(),
-	)
-	g.Description = firstNonEmpty(
-		metaContent("property", "og:description"),
-		metaContent("name", "description"),
-		metaContent("name", "twitter:description"),
-	)
-	g.Image = firstNonEmpty(
-		metaContent("property", "og:image"),
-		metaContent("property", "og:image:secure_url"),
-		metaContent("name", "twitter:image"),
-		metaContent("name", "twitter:image:src"),
-	)
-	g.Url = firstNonEmpty(
-		metaContent("property", "og:url"),
-		metaContent("name", "twitter:url"),
-		uri,
-	)
-	g.Site = firstNonEmpty(
-		metaContent("property", "og:site_name"),
-		metaContent("name", "twitter:site"),
-		u.Hostname(),
-	)
-	g.Type = firstNonEmpty(
-		metaContent("property", "og:type"),
-		metaContent("name", "twitter:card"),
-	)
-
-	// Normalize relative image URLs
-	if len(g.Image) > 0 && strings.HasPrefix(g.Image, "/") {
-		g.Image = fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, g.Image)
-	}
-
-	// Attempt to pull main article content using common containers
-	contentSelectors := []string{
-		"article",
-		"main article",
-		".ArticleBody-articleBody",
-		".article-body",
-		".article__content",
-		"main",
-	}
-
-	for _, sel := range contentSelectors {
-		section := d.Find(sel)
-		if section.Length() == 0 {
+	for _, node := range d.Find("meta").Nodes {
+		if len(node.Attr) < 2 {
 			continue
 		}
-		if html, err := section.First().Html(); err == nil {
-			if text := htmlToText(html); text != "" {
-				g.Content = text
-				break
+
+		p := strings.Split(node.Attr[0].Val, ":")
+		if !check(p) {
+			p = strings.Split(node.Attr[1].Val, ":")
+			if !check(p) {
+				continue
+			}
+			node.Attr = node.Attr[1:]
+			if len(node.Attr) < 2 {
+				continue
+			}
+		}
+
+		switch p[1] {
+		case "site_name":
+			g.Site = node.Attr[1].Val
+		case "site":
+			if len(g.Site) == 0 {
+				g.Site = node.Attr[1].Val
+			}
+		case "title":
+			g.Title = node.Attr[1].Val
+		case "description":
+			g.Description = node.Attr[1].Val
+		case "card", "type":
+			g.Type = node.Attr[1].Val
+		case "url":
+			g.Url = node.Attr[1].Val
+		case "image":
+			if len(p) > 2 && p[2] == "src" {
+				g.Image = node.Attr[1].Val
+			} else if len(p) > 2 {
+				continue
+			} else if len(g.Image) == 0 {
+				g.Image = node.Attr[1].Val
+			}
+
+			if len(g.Image) > 0 && g.Image[0] == '/' {
+				g.Image = fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, g.Image)
 			}
 		}
 	}
 
-	// Fallback: grab first few paragraphs as plain text
-	if g.Content == "" {
+	// attempt to get the content
+	var fn func(*nethtml.Node)
+
+	fn = func(node *nethtml.Node) {
+		if node.Type == nethtml.TextNode && len(node.Data) > 0 {
+			first := node.Data[0]
+			last := node.Data[len(node.Data)-1]
+
+			data := sanitize.HTML(node.Data)
+
+			if unicode.IsUpper(rune(first)) && last == '.' {
+				g.Content += fmt.Sprintf(`<p>%s</p>`, data)
+			} else if first == '"' && last == '"' {
+				g.Content += fmt.Sprintf(`<p>%s</p>`, data)
+			} else {
+				g.Content += fmt.Sprintf(` %s`, data)
+			}
+		}
+
+		if node.FirstChild != nil {
+			for c := node.FirstChild; c != nil; c = c.NextSibling {
+				fn(c)
+			}
+		}
+	}
+
+	if strings.Contains(u.String(), "cnbc.com") {
+		for _, node := range d.Find(".ArticleBody-articleBody").Nodes {
+			fn(node)
+		}
+	}
+
+	// Attempt to pull main article content using common containers if still empty
+	if len(strings.TrimSpace(g.Content)) == 0 {
+		contentSelectors := []string{
+			"article",
+			"main article",
+			".ArticleBody-articleBody",
+			".article-body",
+			".article__content",
+			"main",
+		}
+
+		for _, sel := range contentSelectors {
+			section := d.Find(sel)
+			if section.Length() == 0 {
+				continue
+			}
+			if html, err := section.First().Html(); err == nil {
+				if text := htmlToText(html); text != "" {
+					g.Content = text
+					break
+				}
+			}
+		}
+	}
+
+	if strings.TrimSpace(g.Content) == "" {
 		var paras []string
 		d.Find("p").EachWithBreak(func(i int, s *goquery.Selection) bool {
 			txt := strings.TrimSpace(s.Text())
@@ -514,11 +654,17 @@ func getMetadata(uri string) (*Metadata, error) {
 		g.Content = strings.Join(paras, " ")
 	}
 
+	if g.Url == "" {
+		g.Url = uri
+	}
+
+	saveCachedMetadata(uri, g)
+
 	return g, nil
 }
 
 func fetchQuranReminder() (string, error) {
-	fmt.Println("Getting Reminder at", time.Now().String())
+	app.Log("news", "Getting Reminder at %s", time.Now().String())
 	uri := "https://reminder.dev/api/daily/latest"
 
 	resp, err := http.Get(uri)
@@ -543,7 +689,7 @@ func fetchQuranReminder() (string, error) {
 }
 
 func fetchBibleReminder() (string, error) {
-	fmt.Println("Getting Bible Reminder at", time.Now().String())
+	app.Log("news", "Getting Bible Reminder at %s", time.Now().String())
 	req, err := http.NewRequest("GET", "https://beta.ourmanna.com/api/v1/get?format=json&order=daily", nil)
 	if err != nil {
 		return "", err
@@ -586,7 +732,7 @@ func fetchBibleReminder() (string, error) {
 }
 
 func fetchZenReminder() (string, error) {
-	fmt.Println("Getting Zen Quote at", time.Now().String())
+	app.Log("news", "Getting Zen Quote at %s", time.Now().String())
 	resp, err := http.Get("https://zenquotes.io/api/random")
 	if err != nil {
 		return "", err
@@ -640,7 +786,7 @@ func getReminder() {
 	}
 
 	if err != nil {
-		fmt.Println("Error getting reminder", err)
+		app.Log("news", "Error getting reminder: %v", err)
 		time.Sleep(time.Minute)
 		go getReminder()
 		return
@@ -660,19 +806,19 @@ func getReminder() {
 func parseFeed() {
 	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Recovered from panic in feed parser: %v\n", r)
+			app.Log("news", "Recovered from panic in feed parser: %v", r)
 			// You can perform cleanup, logging, or other error handling here.
 			// For example, you might send an error to a channel to notify main.
 			debug.PrintStack()
 
-			fmt.Println("Relaunching feed parser in 1 minute")
+			app.Log("news", "Relaunching feed parser in 1 minute")
 			time.Sleep(time.Minute)
 
 			go parseFeed()
 		}
 	}()
 
-	fmt.Println("Parsing feed at", time.Now().String())
+	app.Log("news", "Parsing feed at %s", time.Now().String())
 	p := gofeed.NewParser()
 	p.UserAgent = "Mu/0.1"
 
@@ -733,7 +879,7 @@ func parseFeed() {
 				stat.Attempts++
 				stat.Error = err
 				stat.Backoff = time.Now().Add(backoff(stat.Attempts))
-				fmt.Printf("Error parsing %s (%s): %v\n", sourceName, feedUrl, err)
+				app.Log("news", "Error parsing %s (%s): %v", sourceName, feedUrl, err)
 
 				mutex.Lock()
 				status[feedID] = &stat
@@ -758,23 +904,21 @@ func parseFeed() {
 					break
 				}
 
-				for _, fn := range replace {
-					item.Description = fn(item.Description)
-				}
+				item.Description = applyContentParsers(item.Description, sourceName)
 
 				link := item.Link
 
-				fmt.Println("Checking link", link)
+				app.Log("news", "Checking link %s", link)
 
 				if strings.HasPrefix(link, "https://themwl.org/ar/") {
 					link = strings.Replace(link, "themwl.org/ar/", "themwl.org/en/", 1)
-					fmt.Println("Replacing mwl ar link", item.Link, link)
+					app.Log("news", "Replacing mwl ar link %s -> %s", item.Link, link)
 				}
 
 				// get meta
 				md, err := getMetadata(link)
 				if err != nil {
-					fmt.Println("Error parsing", link, err)
+					app.Log("news", "Error parsing %s: %v", link, err)
 					continue
 				}
 
@@ -796,7 +940,32 @@ func parseFeed() {
 				}
 
 				// Clean up description HTML
-				cleanDescription := htmlToText(item.Description)
+				desc := item.Description
+
+				// Convert plain text newlines to em dashes
+				if !strings.Contains(desc, "<") {
+					desc = strings.ReplaceAll(desc, "\n", " — ")
+				}
+
+				cleanDescription := htmlToText(desc)
+
+				maxLen := 250
+				if len(cleanDescription) > maxLen {
+					truncated := cleanDescription[:maxLen]
+					if idx := strings.Index(truncated, ". "); idx > 0 {
+						cleanDescription = truncated[:idx+1]
+					} else if idx := strings.Index(truncated, ".\n"); idx > 0 {
+						cleanDescription = truncated[:idx+1]
+					} else {
+						cleanDescription = truncated[:maxLen-3] + "..."
+					}
+				} else {
+					if idx := strings.Index(cleanDescription, ". "); idx > 0 {
+						cleanDescription = cleanDescription[:idx+1]
+					} else if idx := strings.Index(cleanDescription, ".\n"); idx > 0 {
+						cleanDescription = cleanDescription[:idx+1]
+					}
+				}
 
 				// Generate stable ID from URL hash - more reliable than GUID which can change
 				itemID := fmt.Sprintf("%x", md5.Sum([]byte(link)))[:16]
@@ -821,7 +990,7 @@ func parseFeed() {
 					itemID,
 					"news",
 					item.Title,
-					item.Description+" "+item.Content,
+					cleanDescription+" "+item.Content,
 					map[string]interface{}{
 						"url":       link,
 						"category":  category,
@@ -848,7 +1017,7 @@ func parseFeed() {
 	    </div>
 	  </div>
 	  <div style="font-size: 0.8em; margin-top: 5px; color: #777;">%s</div>
-				`, item.GUID, link, md.Image, link, item.Title, item.Description, getSummary(post))
+				`, item.GUID, link, md.Image, link, item.Title, cleanDescription, getSummary(post))
 				} else {
 					val = fmt.Sprintf(`
 	<div id="%s" class="news">
@@ -864,7 +1033,7 @@ func parseFeed() {
 	    </div>
 	  </div>
 	  <div style="font-size: 0.8em; margin-top: 5px; color: #777;">%s</div>
-				`, item.GUID, link, link, item.Title, item.Description, getSummary(post))
+				`, item.GUID, link, link, item.Title, cleanDescription, getSummary(post))
 				}
 
 				// close div
@@ -1025,14 +1194,14 @@ func Load() {
 
 	// Refresh feeds automatically when settings change
 	config.RegisterUpdateHook(func(config.Settings) {
-		fmt.Println("Settings changed, refreshing news...")
+		app.Log("news", "Settings changed, refreshing news...")
 		go Refresh()
 	})
 }
 
 // Refresh reloads feed configurations and triggers a fetch
 func Refresh() {
-	fmt.Println("Refreshing news feeds...")
+	app.Log("news", "Refreshing news feeds...")
 	loadFeed()
 
 	// Reset status and cached content to force immediate fetch and rebuild
@@ -1105,7 +1274,7 @@ func refreshReminder(source string) {
 	}()
 
 	if err != nil || html == "" {
-		fmt.Println("Reminder refresh error:", err)
+		app.Log("news", "Reminder refresh error: %v", err)
 		return
 	}
 
@@ -1120,11 +1289,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	mutex.RLock()
 	defer mutex.RUnlock()
 
-	if ct := r.Header.Get("Content-Type"); ct == "application/json" {
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
 		resp := map[string]interface{}{
 			"feed": feed,
 		}
 		b, _ := json.Marshal(resp)
+		w.Header().Set("Content-Type", "application/json")
 		w.Write(b)
 		return
 	}

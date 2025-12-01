@@ -54,15 +54,14 @@ func TestLinkify(t *testing.T) {
 func TestPostCRUD(t *testing.T) {
 	posts = []*Post{}
 
-	if err := CreatePost("Hello World", "This is a test post.", "tester", "123"); err != nil {
+	id, err := CreatePost("Hello World", "This is a test post.", "tester", "123")
+	if err != nil {
 		t.Fatalf("CreatePost failed: %v", err)
 	}
 
 	if len(posts) != 1 {
 		t.Fatalf("Expected 1 post, got %d", len(posts))
 	}
-
-	id := posts[0].ID
 
 	post := GetPost(id)
 	if post == nil {

@@ -42,10 +42,24 @@ func SaveJSON(key string, val interface{}) error {
 	dir := os.ExpandEnv("$HOME/.mu")
 	path := filepath.Join(dir, "data")
 	file := filepath.Join(path, key)
-	os.MkdirAll(path, 0700)
+	os.MkdirAll(filepath.Dir(file), 0700)
 	os.WriteFile(file, b, 0644)
 
 	return nil
+}
+
+// LoadJSON loads JSON from disk into the provided struct pointer.
+func LoadJSON(key string, val interface{}) error {
+	dir := os.ExpandEnv("$HOME/.mu")
+	path := filepath.Join(dir, "data")
+	file := filepath.Join(path, key)
+
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(b, val)
 }
 
 // ============================================
@@ -95,7 +109,7 @@ func Index(id, entryType, title, content string, metadata map[string]interface{}
 		}
 		textToEmbed = title + " " + content[:maxContent]
 	}
-	
+
 	embedding, err := getEmbedding(textToEmbed)
 	if err == nil && len(embedding) > 0 {
 		entry.Embedding = embedding
@@ -131,7 +145,7 @@ func Search(query string, limit int) []*IndexEntry {
 			if len(entry.Embedding) == 0 {
 				continue // Skip entries without embeddings
 			}
-			
+
 			similarity := cosineSimilarity(queryEmbedding, entry.Embedding)
 			if similarity > 0.3 { // Threshold to filter irrelevant results
 				results = append(results, SearchResult{
@@ -170,14 +184,14 @@ func Search(query string, limit int) []*IndexEntry {
 		score := 0.0
 		titleLower := strings.ToLower(entry.Title)
 		contentLower := strings.ToLower(entry.Content)
-		
+
 		// Simple contains matching
 		if strings.Contains(titleLower, queryLower) {
 			score = 3.0
 		} else if strings.Contains(contentLower, queryLower) {
 			score = 1.0
 		}
-		
+
 		if score > 0 {
 			results = append(results, SearchResult{
 				Entry: entry,
@@ -263,42 +277,44 @@ func Load() {
 
 // getEmbedding generates a vector embedding for text using Ollama
 func getEmbedding(text string) ([]float64, error) {
-	if len(text) == 0 {
+	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("empty text")
 	}
 
+	fmt.Printf("[data] Generating embedding for text (length: %d)\n", len(text))
+
 	// Ollama embedding endpoint
 	url := "http://localhost:11434/api/embeddings"
-	
+
 	requestBody := map[string]interface{}{
 		"model":  "nomic-embed-text",
 		"prompt": text,
 	}
-	
+
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("ollama error: %s", string(body))
 	}
-	
+
 	var result struct {
 		Embedding []float64 `json:"embedding"`
 	}
-	
+
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-	
+
 	return result.Embedding, nil
 }
 
@@ -307,18 +323,18 @@ func cosineSimilarity(a, b []float64) float64 {
 	if len(a) != len(b) {
 		return 0.0
 	}
-	
+
 	var dotProduct, normA, normB float64
-	
+
 	for i := range a {
 		dotProduct += a[i] * b[i]
 		normA += a[i] * a[i]
 		normB += b[i] * b[i]
 	}
-	
+
 	if normA == 0 || normB == 0 {
 		return 0.0
 	}
-	
+
 	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
 }
