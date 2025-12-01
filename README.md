@@ -2,7 +2,7 @@
 
 Local-first, ad-free personal hub. This fork experiments with a papyrus theme and is not production-ready.
 
-<img width="6000" height="900" alt="image" src="https://github.com/user-attachments/assets/38450e3b-dcec-4b6e-b663-6e911ed34b62" />
+<img width="1136" height="863" alt="image" src="https://github.com/user-attachments/assets/78b1ebc1-4c80-4c59-94a2-95bccab98a17" />
 
 ## Features
 
