@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -30,6 +31,15 @@ import (
 var EnvFlag = flag.String("env", "dev", "Set the environment")
 var ServeFlag = flag.Bool("serve", false, "Run the server")
 var AddressFlag = flag.String("address", ":8030", "Address for server")
+
+var loadingPage = []byte(app.RenderHTML(
+	"Loading",
+	"Preparing Mu",
+	`<div style="padding: 40px; text-align: center;">
+      <h2>Loading...</h2>
+      <p>Fetching links and generating vectors. The app will open once everything is ready.</p>
+    </div>`,
+))
 
 func normalizeAddress(addr string) string {
 	if strings.HasPrefix(addr, ":") {
@@ -77,6 +87,28 @@ func main() {
 
 	// load the home cards
 	home.Load()
+
+	// Track readiness so we don't open the app until background indexing completes
+	var appReady atomic.Bool
+	appReady.Store(false)
+	startupReady := make(chan struct{})
+
+	go func() {
+		ctx := context.Background()
+		waiters := []func(context.Context) error{
+			news.WaitReady,
+			video.WaitReady,
+		}
+
+		for _, wait := range waiters {
+			if err := wait(ctx); err != nil {
+				fmt.Printf("Startup wait error: %v\n", err)
+			}
+		}
+
+		appReady.Store(true)
+		close(startupReady)
+	}()
 
 	// serve video
 	http.HandleFunc("/video", video.Handler)
@@ -161,16 +193,8 @@ func main() {
 	addr := normalizeAddress(*AddressFlag)
 	fmt.Println("Starting server on", addr)
 
-	// attempt to open the browser to the home page after server is listening
+	// attempt to open the browser to the home page after background prep finishes
 	var openOnce sync.Once
-	go func() {
-		// give the server a moment to finish its startup work before opening the browser
-		time.Sleep(3 * time.Second)
-		openOnce.Do(func() {
-			url := "http://localhost" + addr
-			_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url+"/home").Start()
-		})
-	}()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if *EnvFlag == "dev" {
@@ -183,6 +207,14 @@ func main() {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
+		}
+
+		if !appReady.Load() && !isStaticAsset(r.URL.Path) {
+			w.Header().Set("Retry-After", "10")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write(loadingPage)
+			return
 		}
 
 		// Check if this is a user profile request (/@username)
@@ -205,6 +237,14 @@ func main() {
 		}
 	}()
 
+	go func() {
+		<-startupReady
+		openOnce.Do(func() {
+			url := "http://localhost" + addr
+			_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", url+"/home").Start()
+		})
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 	<-quit
@@ -216,4 +256,24 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		fmt.Printf("Server forced to shutdown: %v\n", err)
 	}
+}
+
+// isStaticAsset returns true for requests that should bypass the loading gate
+// (CSS, JS, icons, manifest, and cached JSON blobs).
+func isStaticAsset(path string) bool {
+	path = strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(path, ".css"),
+		strings.HasSuffix(path, ".js"),
+		strings.HasSuffix(path, ".png"),
+		strings.HasSuffix(path, ".jpg"),
+		strings.HasSuffix(path, ".jpeg"),
+		strings.HasSuffix(path, ".gif"),
+		strings.HasSuffix(path, ".svg"),
+		strings.HasSuffix(path, ".ico"),
+		strings.HasSuffix(path, ".webmanifest"),
+		strings.HasSuffix(path, ".json"):
+		return true
+	}
+	return false
 }

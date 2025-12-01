@@ -30,6 +30,10 @@ var mutex sync.RWMutex
 // category to channel mapping
 var channels = map[string]string{}
 
+// initial load readiness
+var initialReadyOnce sync.Once
+var initialReady = make(chan struct{})
+
 // latest videos from channels
 var videos = map[string]Channel{}
 
@@ -59,6 +63,12 @@ var (
 	client   *youtube.Service
 	lastKey  string
 )
+
+func markInitialReady() {
+	initialReadyOnce.Do(func() {
+		close(initialReady)
+	})
+}
 
 func getYouTubeClient() (*youtube.Service, error) {
 	clientMu.RLock()
@@ -372,6 +382,7 @@ func loadVideos() {
 	youtubeClient, err := getYouTubeClient()
 	if err != nil {
 		app.Log("video", "Video refresh skipped: %v", err)
+		markInitialReady()
 		time.Sleep(time.Hour)
 		go loadVideos()
 		return
@@ -418,6 +429,7 @@ func loadVideos() {
 	// keep existing cached data and try again later instead of crashing.
 	if len(latest) == 0 {
 		app.Log("video", "No video results loaded; skipping refresh")
+		markInitialReady()
 		time.Sleep(time.Hour)
 		go loadVideos()
 		return
@@ -461,8 +473,21 @@ func loadVideos() {
 	videosHtml = vidHtml
 	mutex.Unlock()
 
+	// Signal initial load completion (includes link fetch + vectorization)
+	markInitialReady()
+
 	time.Sleep(time.Hour)
 	go loadVideos()
+}
+
+// WaitReady blocks until the first video load/index run has finished.
+func WaitReady(ctx context.Context) error {
+	select {
+	case <-initialReady:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func embedVideo(id string) string {

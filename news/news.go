@@ -1,6 +1,7 @@
 package news
 
 import (
+	"context"
 	"crypto/md5"
 	"embed"
 	"encoding/json"
@@ -60,6 +61,15 @@ var reminderHtml string
 var reminderSource string
 var reminderFetched time.Time
 var reminderMutex sync.Mutex
+
+// initial load readiness
+var initialReadyOnce sync.Once
+var initialReady = make(chan struct{})
+
+// throttle repeated fetch on restart
+var lastRefreshAt time.Time
+
+const refreshTTL = 15 * time.Minute
 
 // track the currently loaded news source selection to detect drift vs settings
 var sourcesSignature string
@@ -1140,7 +1150,17 @@ func parseFeed() {
 	// save the prices as JSON for persistence
 	data.SaveJSON("prices.json", cachedPrices)
 
+	// record refresh time
+	now := time.Now()
+	lastRefreshAt = now
+	data.SaveFile("news/last_refresh.txt", now.Format(time.RFC3339))
+
 	mutex.Unlock()
+
+	// Signal that the first parsing/indexing pass is complete
+	initialReadyOnce.Do(func() {
+		close(initialReady)
+	})
 
 	// wait an hour
 	time.Sleep(time.Hour)
@@ -1188,13 +1208,48 @@ func Load() {
 	// load the feeds
 	loadFeed()
 
-	go parseFeed()
+	// load last refresh time if available
+	if tbytes, err := data.LoadFile("news/last_refresh.txt"); err == nil {
+		if ts, err := time.Parse(time.RFC3339, string(tbytes)); err == nil {
+			lastRefreshAt = ts
+		}
+	}
+
+	// If we already have cached content, allow the app to start immediately;
+	// background refresh will still happen later.
+	if headlinesHtml != "" || marketsHtml != "" || reminderHtml != "" {
+		initialReadyOnce.Do(func() {
+			close(initialReady)
+		})
+	}
+
+	// Only refresh immediately if stale; otherwise defer until TTL expires
+	if lastRefreshAt.IsZero() || time.Since(lastRefreshAt) >= refreshTTL {
+		go parseFeed()
+	} else {
+		delay := refreshTTL - time.Since(lastRefreshAt)
+		go func() {
+			time.Sleep(delay)
+			parseFeed()
+		}()
+	}
 
 	go getReminder()
 
 	// Refresh feeds automatically when settings change
-	config.RegisterUpdateHook(func(config.Settings) {
-		app.Log("news", "Settings changed, refreshing news...")
+	config.RegisterUpdateHook(func(cfg config.Settings) {
+		desired := signatureFromSelection(cfg.NewsSources)
+
+		mutex.RLock()
+		current := sourcesSignature
+		mutex.RUnlock()
+
+		if desired == current {
+			app.Log("news", "Settings saved; news sources unchanged, skipping news refresh")
+			return
+		}
+
+		app.Log("news", "News sources changed, refreshing news...")
 		go Refresh()
 	})
 }
@@ -1213,9 +1268,26 @@ func Refresh() {
 	feed = nil
 	marketsHtml = ""
 	lastRefreshRequest = time.Time{}
+	lastRefreshAt = time.Time{}
 	mutex.Unlock()
 
 	go parseFeed()
+}
+
+// WaitReady blocks until the initial feed parsing and vectorization run finishes.
+func WaitReady(ctx context.Context) error {
+	select {
+	case <-initialReady:
+		return nil
+	default:
+	}
+
+	select {
+	case <-initialReady:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func Headlines() string {

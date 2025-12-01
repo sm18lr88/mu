@@ -2,6 +2,7 @@ package data
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -69,17 +71,21 @@ func LoadJSON(key string, val interface{}) error {
 var (
 	indexMutex sync.RWMutex
 	index      = make(map[string]*IndexEntry)
+
+	embeddingCacheMu sync.RWMutex
+	embeddingCache   = make(map[string][]float64)
 )
 
 // IndexEntry represents a searchable piece of content
 type IndexEntry struct {
-	ID        string                 `json:"id"`
-	Type      string                 `json:"type"` // "news", "video", "market", "reminder"
-	Title     string                 `json:"title"`
-	Content   string                 `json:"content"`
-	Metadata  map[string]interface{} `json:"metadata"`
-	Embedding []float64              `json:"embedding"` // Vector embedding for semantic search
-	IndexedAt time.Time              `json:"indexed_at"`
+	ID            string                 `json:"id"`
+	Type          string                 `json:"type"` // "news", "video", "market", "reminder"
+	Title         string                 `json:"title"`
+	Content       string                 `json:"content"`
+	Metadata      map[string]interface{} `json:"metadata"`
+	Embedding     []float64              `json:"embedding"`      // Vector embedding for semantic search
+	EmbeddingHash string                 `json:"embedding_hash"` // Hash of embedded text to avoid recompute
+	IndexedAt     time.Time              `json:"indexed_at"`
 }
 
 // SearchResult represents a search hit with relevance score
@@ -90,6 +96,23 @@ type SearchResult struct {
 
 // Index adds or updates an entry in the search index
 func Index(id, entryType, title, content string, metadata map[string]interface{}) {
+	indexMutex.RLock()
+	existing := index[id]
+	indexMutex.RUnlock()
+
+	sameContent := false
+	if existing != nil {
+		sameContent = existing.Type == entryType &&
+			existing.Title == title &&
+			existing.Content == content &&
+			reflect.DeepEqual(existing.Metadata, metadata)
+
+		// If nothing changed and we already have an embedding, skip re-indexing
+		if sameContent && len(existing.Embedding) > 0 {
+			return
+		}
+	}
+
 	entry := &IndexEntry{
 		ID:        id,
 		Type:      entryType,
@@ -110,9 +133,24 @@ func Index(id, entryType, title, content string, metadata map[string]interface{}
 		textToEmbed = title + " " + content[:maxContent]
 	}
 
-	embedding, err := getEmbedding(textToEmbed)
-	if err == nil && len(embedding) > 0 {
+	embedHash := fmt.Sprintf("%x", sha256.Sum256([]byte(textToEmbed)))
+
+	var embedding []float64
+
+	// Reuse existing embedding if the embedded text hasn't changed
+	if existing != nil && existing.EmbeddingHash == embedHash && len(existing.Embedding) > 0 {
+		embedding = existing.Embedding
+	} else {
+		var err error
+		embedding, err = getEmbedding(textToEmbed)
+		if err != nil {
+			embedding = nil
+		}
+	}
+
+	if len(embedding) > 0 {
 		entry.Embedding = embedding
+		entry.EmbeddingHash = embedHash
 	}
 
 	indexMutex.Lock()
@@ -136,6 +174,7 @@ func Search(query string, limit int) []*IndexEntry {
 	defer indexMutex.RUnlock()
 
 	// Try vector search first
+	queryLower := strings.ToLower(query)
 	queryEmbedding, err := getEmbedding(query)
 	if err == nil && len(queryEmbedding) > 0 {
 		fmt.Printf("[SEARCH] Using vector search for: %s\n", query)
@@ -147,11 +186,16 @@ func Search(query string, limit int) []*IndexEntry {
 			}
 
 			similarity := cosineSimilarity(queryEmbedding, entry.Embedding)
-			if similarity > 0.3 { // Threshold to filter irrelevant results
-				results = append(results, SearchResult{
-					Entry: entry,
-					Score: similarity,
-				})
+			if similarity > 0.3 {
+				titleLower := strings.ToLower(entry.Title)
+				contentLower := strings.ToLower(entry.Content)
+
+				// Require either a text hit or a stronger semantic score
+				if !strings.Contains(titleLower, queryLower) && !strings.Contains(contentLower, queryLower) && similarity < 0.6 {
+					continue
+				}
+
+				results = append(results, SearchResult{Entry: entry, Score: similarity})
 			}
 		}
 
@@ -177,7 +221,6 @@ func Search(query string, limit int) []*IndexEntry {
 
 	// Fallback: Simple text matching if vector search fails or returns no results
 	fmt.Printf("[SEARCH] Using text fallback for: %s\n", query)
-	queryLower := strings.ToLower(query)
 	var results []SearchResult
 
 	for _, entry := range index {
@@ -269,11 +312,23 @@ func Load() {
 	defer indexMutex.Unlock()
 
 	json.Unmarshal(b, &index)
+
+	// load embedding cache (best-effort)
+	if cacheBytes, err := LoadFile("embedding_cache.json"); err == nil && len(cacheBytes) > 0 {
+		var cache map[string][]float64
+		if err := json.Unmarshal(cacheBytes, &cache); err == nil && cache != nil {
+			embeddingCacheMu.Lock()
+			embeddingCache = cache
+			embeddingCacheMu.Unlock()
+		}
+	}
 }
 
 // ============================================
 // VECTOR EMBEDDINGS VIA OLLAMA
 // ============================================
+
+const defaultEmbedModel = "qwen3-embedding:0.6b"
 
 // getEmbedding generates a vector embedding for text using Ollama
 func getEmbedding(text string) ([]float64, error) {
@@ -281,13 +336,27 @@ func getEmbedding(text string) ([]float64, error) {
 		return nil, fmt.Errorf("empty text")
 	}
 
+	// return cached embedding if available
+	key := strings.TrimSpace(text)
+	embeddingCacheMu.RLock()
+	if cached, ok := embeddingCache[key]; ok && len(cached) > 0 {
+		embeddingCacheMu.RUnlock()
+		return cached, nil
+	}
+	embeddingCacheMu.RUnlock()
+
 	fmt.Printf("[data] Generating embedding for text (length: %d)\n", len(text))
 
 	// Ollama embedding endpoint
 	url := "http://localhost:11434/api/embeddings"
 
+	model := strings.TrimSpace(os.Getenv("OLLAMA_EMBED_MODEL"))
+	if model == "" {
+		model = defaultEmbedModel
+	}
+
 	requestBody := map[string]interface{}{
-		"model":  "nomic-embed-text",
+		"model":  model,
 		"prompt": text,
 	}
 
@@ -315,6 +384,14 @@ func getEmbedding(text string) ([]float64, error) {
 		return nil, err
 	}
 
+	// persist to cache asynchronously (best-effort)
+	embeddingCacheMu.Lock()
+	embeddingCache[key] = result.Embedding
+	embeddingCacheMu.Unlock()
+	go func(snapshot map[string][]float64) {
+		SaveJSON("embedding_cache.json", snapshot)
+	}(copyEmbeddingCache())
+
 	return result.Embedding, nil
 }
 
@@ -337,4 +414,14 @@ func cosineSimilarity(a, b []float64) float64 {
 	}
 
 	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+func copyEmbeddingCache() map[string][]float64 {
+	embeddingCacheMu.RLock()
+	defer embeddingCacheMu.RUnlock()
+	cp := make(map[string][]float64, len(embeddingCache))
+	for k, v := range embeddingCache {
+		cp[k] = v
+	}
+	return cp
 }

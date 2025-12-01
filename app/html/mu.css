@@ -457,7 +457,7 @@ hr[id], h1[id], .section h1 {
   padding: 20px;
   margin-bottom: 20px;
   padding-bottom: 25px;
-  /* Very subtle highlight for cards */
+  /* Base subtle highlight for generic cards */
   background: rgba(255, 255, 255, 0.15);
 }
 
@@ -465,6 +465,57 @@ hr[id], h1[id], .section h1 {
   margin-top: 0;
   margin-bottom: 10px;
   font-size: 1.4em;
+}
+
+/* ========================================
+   PAPYRUS EFFECT FOR HOMEPAGE CARDS
+   ======================================== */
+/* Home cards: News, Reminder, Markets, Posts */
+#news.card,
+#reminder.card,
+#markets.card,
+#posts.card {
+  position: relative;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  overflow: visible;
+}
+
+#news.card h4,
+#reminder.card h4,
+#markets.card h4,
+#posts.card h4 {
+  margin-top: 0;
+  font-size: 1.35em;
+}
+
+#news.card::before,
+#reminder.card::before,
+#markets.card::before,
+#posts.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: #fff7dc;
+  background-image: var(--parchment-noise);
+  border: 1px solid #d0c6aa;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.18),
+    0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+  filter: url(#wavy2);
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* Hide scrollbars globally (Reminder card and elsewhere) */
+* {
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
 }
 
 .card form {
@@ -1056,7 +1107,7 @@ body:has(#messages) #content {
 .category {
   font-family: "Walter Turncoat", cursive;
   color: #4a2c16;
-  font-size: 1.1em;
+  font-size: 0.6em;
   font-weight: 700;
   padding: 0 5px 0 0;
   background: transparent;
