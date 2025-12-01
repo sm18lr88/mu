@@ -13,6 +13,7 @@ import (
 
 	"mu/app"
 	"mu/blog"
+	"mu/config"
 	"mu/news"
 	"mu/video"
 )
@@ -40,11 +41,11 @@ type Card struct {
 var (
 	lastRefresh time.Time
 	cacheMutex  sync.RWMutex
-	cacheTTL    = 2 * time.Minute
+	cacheTTL    time.Duration = 0 // Always refresh card content for latest feeds/settings
 )
 
 type CardConfig struct {
-	Left  []struct {
+	Left []struct {
 		ID       string `json:"id"`
 		Title    string `json:"title"`
 		Type     string `json:"type"`
@@ -64,25 +65,25 @@ var Cards []Card
 
 func Load() {
 	data, _ := f.ReadFile("cards.json")
-	var config CardConfig
-	if err := json.Unmarshal(data, &config); err != nil {
+	var cardsCfg CardConfig
+	if err := json.Unmarshal(data, &cardsCfg); err != nil {
 		fmt.Println("Error loading cards.json:", err)
 		return
 	}
-	
+
 	// Map of card types to their content functions
 	cardFunctions := map[string]func() string{
-		"news": news.Headlines,
-		"markets": news.Markets,
+		"news":     news.Headlines,
+		"markets":  news.Markets,
 		"reminder": news.Reminder,
-		"posts": blog.Preview,
-		"video": video.Latest,
+		"posts":    blog.Preview,
+		"video":    video.Latest,
 	}
-	
+
 	// Build Cards array from config
 	Cards = []Card{}
-	
-	for _, c := range config.Left {
+
+	for _, c := range cardsCfg.Left {
 		if fn, ok := cardFunctions[c.Type]; ok {
 			Cards = append(Cards, Card{
 				ID:       c.ID,
@@ -94,8 +95,8 @@ func Load() {
 			})
 		}
 	}
-	
-	for _, c := range config.Right {
+
+	for _, c := range cardsCfg.Right {
 		if fn, ok := cardFunctions[c.Type]; ok {
 			Cards = append(Cards, Card{
 				ID:       c.ID,
@@ -107,7 +108,7 @@ func Load() {
 			})
 		}
 	}
-	
+
 	// Sort by column and position
 	sort.Slice(Cards, func(i, j int) bool {
 		if Cards[i].Column != Cards[j].Column {
@@ -115,40 +116,42 @@ func Load() {
 		}
 		return Cards[i].Position < Cards[j].Position
 	})
-	
+
 	// Do initial refresh
 	RefreshCards()
+
+	// Refresh cards immediately when settings change (e.g., news sources)
+	config.RegisterUpdateHook(func(config.Settings) {
+		cacheMutex.Lock()
+		lastRefresh = time.Time{}
+		cacheMutex.Unlock()
+		RefreshCards()
+	})
 }
 
 // RefreshCards updates card content and timestamps if content changed
 func RefreshCards() {
 	cacheMutex.Lock()
 	defer cacheMutex.Unlock()
-	
+
 	now := time.Now()
-	
-	// Check if cache is still valid
-	if now.Sub(lastRefresh) < cacheTTL {
-		return
-	}
-	
+	cacheValid := cacheTTL > 0 && now.Sub(lastRefresh) < cacheTTL
+
 	for i := range Cards {
 		card := &Cards[i]
-		
-		// Get fresh content
-		content := card.Content()
-		
-		// Calculate hash
-		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-		
-		// Only update if content changed
-		if hash != card.ContentHash {
-			card.CachedHTML = content
-			card.ContentHash = hash
-			card.UpdatedAt = now
+
+		// Always refresh reminder; others respect cache TTL
+		if !cacheValid || card.ID == "reminder" {
+			content := card.Content()
+			hash := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+			if hash != card.ContentHash {
+				card.CachedHTML = content
+				card.ContentHash = hash
+				card.UpdatedAt = now
+			}
 		}
 	}
-	
+
 	lastRefresh = now
 }
 
@@ -164,7 +167,7 @@ func RefreshHandler(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	}
 	http.SetCookie(w, cookie)
-	
+
 	// Redirect back to home
 	http.Redirect(w, r, "/home", http.StatusSeeOther)
 }
@@ -172,16 +175,16 @@ func RefreshHandler(w http.ResponseWriter, r *http.Request) {
 func Handler(w http.ResponseWriter, r *http.Request) {
 	// Refresh cards if cache expired (2 minute TTL)
 	RefreshCards()
-	
+
 	var leftHTML []string
 	var rightHTML []string
-	
+
 	for _, card := range Cards {
 		content := card.CachedHTML
 		if strings.TrimSpace(content) == "" {
 			continue
 		}
-		
+
 		// Add "More" link if card has a link URL
 		if card.Link != "" {
 			content += app.Link("More", card.Link)
@@ -198,11 +201,11 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	var homepage string
 	if len(leftHTML) == 0 && len(rightHTML) == 0 {
 		// No content - show message
-		homepage = `<div id="home"><div class="home-left">` + 
-			app.Card("no-content", "Welcome", "<p>Welcome to Mu! Your personalized content will appear here.</p>") + 
+		homepage = `<div id="home"><div class="home-left">` +
+			app.Card("no-content", "Welcome", "<p>Welcome to Mu! Your personalized content will appear here.</p>") +
 			`</div><div class="home-right"></div></div>`
 	} else {
-		homepage = fmt.Sprintf(Template, 
+		homepage = fmt.Sprintf(Template,
 			strings.Join(leftHTML, "\n"),
 			strings.Join(rightHTML, "\n"))
 	}

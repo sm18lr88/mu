@@ -3,7 +3,10 @@ package admin
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +49,26 @@ type LLMAnalyzer interface {
 }
 
 var analyzer LLMAnalyzer
+
+func moderationLogFile() string {
+	dir := filepath.Join(os.ExpandEnv("$HOME"), ".mu", "logs")
+	_ = os.MkdirAll(dir, 0700)
+	return filepath.Join(dir, "moderation.log")
+}
+
+func logModerationEvent(msg string) {
+	entry := fmt.Sprintf("%s %s\n", time.Now().UTC().Format(time.RFC3339), msg)
+	f, err := os.OpenFile(moderationLogFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		log.Printf("moderation log open error: %v", err)
+		return
+	}
+	defer f.Close()
+
+	if _, err := f.WriteString(entry); err != nil {
+		log.Printf("moderation log write error: %v", err)
+	}
+}
 
 // ============================================
 // INITIALIZATION
@@ -97,16 +120,19 @@ Respond with just the single word classification.`
 	resp, err := analyzer.Analyze(prompt, question)
 	if err != nil {
 		fmt.Printf("Moderation analysis error: %v\n", err)
+		logModerationEvent(fmt.Sprintf("analysis error for %s:%s - %v", contentType, itemID, err))
 		return
 	}
 
 	resp = strings.TrimSpace(strings.ToUpper(resp))
 	fmt.Printf("Content moderation: %s %s -> %s\n", contentType, itemID, resp)
+	logModerationEvent(fmt.Sprintf("analysis result for %s:%s -> %s", contentType, itemID, resp))
 
 	if resp == "SPAM" || resp == "TEST" || resp == "LOW_QUALITY" {
 		// Auto-flag by system (use "system" as username)
 		Add(contentType, itemID, "system")
 		fmt.Printf("Auto-flagged %s: %s (reason: %s)\n", contentType, itemID, resp)
+		logModerationEvent(fmt.Sprintf("auto-flagged %s:%s (reason: %s)", contentType, itemID, resp))
 	}
 }
 
@@ -150,7 +176,12 @@ func Add(contentType, contentID, username string) (int, bool, error) {
 		item.Flagged = true
 	}
 
-	saveUnlocked()
+	logModerationEvent(fmt.Sprintf("flag added by %s on %s:%s (total %d)", username, contentType, contentID, item.FlagCount))
+
+	if err := saveUnlocked(); err != nil {
+		logModerationEvent(fmt.Sprintf("failed to persist flag for %s:%s - %v", contentType, contentID, err))
+		return item.FlagCount, false, err
+	}
 	return item.FlagCount, false, nil
 }
 
@@ -414,7 +445,7 @@ func ModerateHandler(w http.ResponseWriter, r *http.Request) {
 		itemsList = append(itemsList, html)
 	}
 
-	listHTML := "<p style='color: #666;'>No flagged content</p>"
+	listHTML := "<p style='color: #777;'>No flagged content</p>"
 	if len(itemsList) > 0 {
 		listHTML = strings.Join(itemsList, "\n")
 	}
@@ -422,7 +453,7 @@ func ModerateHandler(w http.ResponseWriter, r *http.Request) {
 	content := fmt.Sprintf(`<div id="moderation">
 		<div class="info-banner">
 			<strong>Community Moderation</strong><br>
-			Review content that has been flagged by users. Content is automatically hidden after 3 flags. 
+			Review content that has been flagged by users. Content is automatically hidden after 3 flags.
 			You can approve (clear flags) or delete the content permanently.
 		</div>
 		<div id="flagged-content">

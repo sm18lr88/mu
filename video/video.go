@@ -8,16 +8,17 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"mu/app"
+	"mu/config"
+	"mu/data"
+
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
-	"mu/app"
-	"mu/data"
 )
 
 //go:embed channels.json
@@ -52,8 +53,54 @@ type Result struct {
 	Published   time.Time `json:"published"`
 }
 
-var Key = os.Getenv("YOUTUBE_API_KEY")
-var Client, _ = youtube.NewService(context.TODO(), option.WithAPIKey(Key))
+var (
+	clientMu sync.RWMutex
+	client   *youtube.Service
+	lastKey  string
+)
+
+func getYouTubeClient() (*youtube.Service, error) {
+	clientMu.RLock()
+	c := client
+	prevKey := lastKey
+	clientMu.RUnlock()
+
+	key := strings.TrimSpace(config.Get().YouTubeAPIKey)
+	if key == "" {
+		return nil, fmt.Errorf("YouTube API key not set (add one in Settings)")
+	}
+
+	// If key changed, drop cached client
+	if prevKey != "" && prevKey != key {
+		clientMu.Lock()
+		client = nil
+		lastKey = ""
+		clientMu.Unlock()
+		c = nil
+	}
+
+	if c != nil {
+		return c, nil
+	}
+
+	svc, err := youtube.NewService(context.TODO(), option.WithAPIKey(key))
+	if err != nil {
+		return nil, err
+	}
+
+	clientMu.Lock()
+	client = svc
+	lastKey = key
+	clientMu.Unlock()
+	return svc, nil
+}
+
+// ResetClient clears the cached YouTube client so a new API key can be applied.
+func ResetClient() {
+	clientMu.Lock()
+	client = nil
+	clientMu.Unlock()
+}
 
 var commonStyles = `
   .thumbnail {
@@ -102,7 +149,7 @@ var commonStyles = `
 	.recent-search-close {
 		display: inline-block;
 		padding: 0 6px;
-		color: #666;
+		color: #777;
 		cursor: pointer;
 		font-weight: bold;
 	}
@@ -136,21 +183,21 @@ var recentSearchesScript = `
 
   function saveRecentSearch(query) {
     if (!query || !query.trim()) return;
-    
+
     try {
       let searches = loadRecentSearches();
-      
+
       // Remove if already exists
       searches = searches.filter(s => s !== query);
-      
+
       // Add to beginning
       searches.unshift(query);
-      
+
       // Keep only MAX_RECENT_SEARCHES
       if (searches.length > MAX_RECENT_SEARCHES) {
         searches = searches.slice(0, MAX_RECENT_SEARCHES);
       }
-      
+
       localStorage.setItem(STORAGE_KEY, JSON.stringify(searches));
     } catch (e) {
       console.error('Error saving recent search:', e);
@@ -160,18 +207,18 @@ var recentSearchesScript = `
   function displayRecentSearches() {
     const searches = loadRecentSearches();
     const container = document.getElementById('recent-searches-container');
-    
+
     if (!container) return;
-    
+
     if (searches.length === 0) {
       container.innerHTML = '';
       return;
     }
-    
+
 		// Get current query from input to highlight active search
 		const queryInput = document.getElementById('query');
 		const currentQuery = queryInput ? queryInput.value.trim() : '';
-    
+
 		let html = '<div class="recent-searches"><h3>Recent Searches</h3><div class="recent-searches-scroll">';
 		searches.forEach(search => {
 			const escaped = escapeHTML(search);
@@ -184,9 +231,9 @@ var recentSearchesScript = `
 					 + '</span>';
 		});
 		html += '</div></div>';
-    
+
     container.innerHTML = html;
-    
+
     // Add click handlers
 		// Clicking the label triggers a search, clicking the close removes it
 		container.querySelectorAll('.recent-search-item').forEach(item => {
@@ -198,10 +245,10 @@ var recentSearchesScript = `
 					e.preventDefault();
 					e.stopPropagation();
 					const query = item.getAttribute('data-query');
-					
+
 					// Move clicked search to front
 					saveRecentSearch(query);
-					
+
 					const queryInput = document.getElementById('query');
 					const form = item.closest('form') || document.querySelector('form');
 					if (queryInput && form) {
@@ -236,7 +283,7 @@ var recentSearchesScript = `
   // Save search when form is submitted
   document.addEventListener('DOMContentLoaded', function() {
     displayRecentSearches();
-    
+
     const form = document.querySelector('form[action="/video"]');
     if (form) {
       form.addEventListener('submit', function() {
@@ -286,6 +333,12 @@ func loadChannels() {
 	if err := json.Unmarshal(data, &channels); err != nil {
 		fmt.Println("Error parsing channels.json", err)
 	}
+	// Temporarily drop faith-specific channels until we can include a broader set of moral/ethical traditions.
+	for name := range channels {
+		if strings.Contains(strings.ToLower(name), "islam") {
+			delete(channels, name)
+		}
+	}
 	mutex.Unlock()
 }
 
@@ -312,6 +365,14 @@ func Load() {
 func loadVideos() {
 	fmt.Println("Loading videos")
 
+	youtubeClient, err := getYouTubeClient()
+	if err != nil {
+		fmt.Println("Video refresh skipped:", err)
+		time.Sleep(time.Hour)
+		go loadVideos()
+		return
+	}
+
 	mutex.RLock()
 	chans := channels
 	mutex.RUnlock()
@@ -327,7 +388,7 @@ func loadVideos() {
 
 	// get results
 	for channel, handle := range chans {
-		html, res, err := getChannel(channel, handle)
+		html, res, err := getChannel(youtubeClient, channel, handle)
 		if err != nil {
 			fmt.Println("Error getting channel", channel, handle, err)
 			continue
@@ -349,13 +410,22 @@ func loadVideos() {
 		return latest[i].Published.After(latest[j].Published)
 	})
 
+	// If we failed to collect any videos (e.g., missing API key/client),
+	// keep existing cached data and try again later instead of crashing.
+	if len(latest) == 0 {
+		fmt.Println("No video results loaded; skipping refresh")
+		time.Sleep(time.Hour)
+		go loadVideos()
+		return
+	}
+
 	// add to body
 	for _, res := range latest {
 		body += res.Html
 	}
 
 	// get chan names and sort
-	for channel, _ := range channels {
+	for channel := range channels {
 		chanNames = append(chanNames, channel)
 	}
 
@@ -397,13 +467,9 @@ func embedVideo(id string) string {
 	return `<iframe width="560" height="315" ` + style + ` src="` + u + `" title="YouTube video player" frameborder="0" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>`
 }
 
-func getChannel(category, handle string) (string, []*Result, error) {
-	if Client == nil {
-		return "", nil, fmt.Errorf("No client")
-	}
-
+func getChannel(youtubeClient *youtube.Service, category, handle string) (string, []*Result, error) {
 	// Get the channel details using the handle
-	call := Client.Channels.List([]string{"contentDetails"}).ForHandle(handle)
+	call := youtubeClient.Channels.List([]string{"contentDetails"}).ForHandle(handle)
 	response, err := call.Do()
 	if err != nil {
 		return "", nil, err
@@ -420,7 +486,7 @@ func getChannel(category, handle string) (string, []*Result, error) {
 	fmt.Printf("Channel ID for @%s: %s\n", handle, channelID)
 	fmt.Printf("Uploads Playlist ID: %s\n", uploadsPlaylistID)
 
-	listVideosCall := Client.PlaylistItems.List([]string{"id", "snippet"}).PlaylistId(uploadsPlaylistID).MaxResults(25)
+	listVideosCall := youtubeClient.PlaylistItems.List([]string{"id", "snippet"}).PlaylistId(uploadsPlaylistID).MaxResults(25)
 	resp, err := listVideosCall.Do()
 	if err != nil {
 		return "", nil, err
@@ -465,18 +531,18 @@ func getChannel(category, handle string) (string, []*Result, error) {
 		if kind == "channel" {
 			results = append([]*Result{res}, results...)
 		} else {
-		// returning json results
-		results = append(results, res)
-	}
+			// returning json results
+			results = append(results, res)
+		}
 
-	channel := fmt.Sprintf(`<a href="https://youtube.com/channel/%s" target="_blank">%s</a>`, item.Snippet.ChannelId, item.Snippet.ChannelTitle)
-	html := fmt.Sprintf(`
+		channel := fmt.Sprintf(`<a href="https://youtube.com/channel/%s" target="_blank">%s</a>`, item.Snippet.ChannelId, item.Snippet.ChannelTitle)
+		html := fmt.Sprintf(`
 		<div class="thumbnail"><a href="%s" target="_blank"><img src="%s"><h3>%s</h3></a>%s | %s</div>`,
-		url, item.Snippet.Thumbnails.Medium.Url, item.Snippet.Title, channel, desc)
-	resultsHtml += html
-	res.Html = html
+			url, item.Snippet.Thumbnails.Medium.Url, item.Snippet.Title, channel, desc)
+		resultsHtml += html
+		res.Html = html
 
-	// Index the video for search/RAG
+		// Index the video for search/RAG
 		data.Index(
 			"video_"+id,
 			"video",
@@ -496,11 +562,12 @@ func getChannel(category, handle string) (string, []*Result, error) {
 }
 
 func getResults(query, channel string) (string, []*Result, error) {
-	if Client == nil {
-		return "", nil, fmt.Errorf("No client")
+	youtubeClient, err := getYouTubeClient()
+	if err != nil {
+		return "", nil, err
 	}
 
-	scall := Client.Search.List([]string{"id", "snippet"}).SafeSearch("strict").MaxResults(25)
+	scall := youtubeClient.Search.List([]string{"id", "snippet"}).SafeSearch("strict").MaxResults(25)
 
 	if len(channel) > 0 {
 		scall = scall.ChannelId(channel)
@@ -576,7 +643,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	// create head
 	var head string
 	var chanNames []string
-	for channel, _ := range channels {
+	for channel := range channels {
 		chanNames = append(chanNames, channel)
 	}
 	sort.Strings(chanNames)

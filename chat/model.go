@@ -1,37 +1,44 @@
 package chat
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"strings"
 )
 
 type Model struct{}
 
-func (m *Model) Generate(prompt *Prompt) (string, error) {
-	var systemPromptText string
-	
-	// Use provided system prompt or generate from template
-	if prompt.System != "" {
-		systemPromptText = prompt.System
-	} else {
-		sb := &strings.Builder{}
-		if err := systemPrompt.Execute(sb, prompt.Rag); err != nil {
-			return "", err
-		}
-		systemPromptText = sb.String()
+func (m *Model) Generate(ctx context.Context, prompt *Prompt) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	
-	// Debug: Show what's being sent to LLM
-	fmt.Printf("[LLM] System prompt:\n%s\n", systemPromptText)
-	fmt.Printf("[LLM] Question: %s\n", prompt.Question)
+	if prompt == nil {
+		return "", fmt.Errorf("prompt is nil")
+	}
+	if strings.TrimSpace(prompt.Question) == "" {
+		return "", fmt.Errorf("question is empty")
+	}
 
+	backend := selectBackend()
+
+	return backend.Ask(ctx, prompt)
+}
+
+func buildSystemPrompt(prompt *Prompt) (string, error) {
+	if prompt.System != "" {
+		return prompt.System, nil
+	}
+
+	sb := &strings.Builder{}
+	if err := systemPrompt.Execute(sb, prompt.Rag); err != nil {
+		return "", err
+	}
+	return sb.String(), nil
+}
+
+func buildFanarMessages(systemPromptText string, prompt *Prompt) []map[string]string {
 	messages := []map[string]string{
-		map[string]string{
+		{
 			"role":    "system",
 			"content": systemPromptText,
 		},
@@ -48,62 +55,45 @@ func (m *Model) Generate(prompt *Prompt) (string, error) {
 		})
 	}
 
-	// add the question
 	messages = append(messages, map[string]string{
 		"role":    "user",
 		"content": prompt.Question,
 	})
 
-	apiKey := os.Getenv("FANAR_API_KEY")
-	apiURL := "https://api.fanar.qa"
-	fanarURL := fmt.Sprintf("%s/v1/chat/completions", apiURL)
+	return messages
+}
 
-	if len(apiKey) == 0 {
-		return "", fmt.Errorf("FANAR_API_KEY not set")
-	}
+func buildPromptText(systemPromptText string, prompt *Prompt) string {
+	var sb strings.Builder
 
-	fanarReq := map[string]interface{}{
-		"model":    "Fanar",
-		"messages": messages,
-	}
-	body, err := json.Marshal(fanarReq)
-	if err != nil {
-		return "", err
-	}
-	httpReq, err := http.NewRequest("POST", fanarURL, bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	var fanarResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error interface{} `json:"error"`
-	}
-	if err := json.Unmarshal(respBody, &fanarResp); err != nil {
-		return "", err
+	system := strings.TrimSpace(systemPromptText)
+	if system != "" {
+		sb.WriteString(system)
+		sb.WriteString("\n\n")
 	}
 
-	var content string
-	if len(fanarResp.Choices) > 0 {
-		content = fanarResp.Choices[0].Message.Content
+	if len(prompt.Context) > 0 {
+		sb.WriteString("Conversation so far:\n")
+		for _, msg := range prompt.Context {
+			user := strings.TrimSpace(msg.Prompt)
+			if user != "" {
+				sb.WriteString("User: ")
+				sb.WriteString(user)
+				sb.WriteString("\n")
+			}
+			answer := strings.TrimSpace(msg.Answer)
+			if answer != "" {
+				sb.WriteString("Assistant: ")
+				sb.WriteString(answer)
+				sb.WriteString("\n")
+			}
+		}
+		sb.WriteString("\n")
 	}
-	if fanarResp.Error != nil {
-		return "", fmt.Errorf("%v", fanarResp.Error)
-	}
-	return content, nil
+
+	sb.WriteString("User question: ")
+	sb.WriteString(strings.TrimSpace(prompt.Question))
+	sb.WriteString("\nProvide a concise, helpful answer in markdown.")
+
+	return strings.TrimSpace(sb.String())
 }

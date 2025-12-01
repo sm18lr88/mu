@@ -4,18 +4,22 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	htmlstd "html"
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"mu/auth"
+	"mu/config"
 
 	"github.com/gomarkdown/markdown"
-	"github.com/gomarkdown/markdown/html"
+	mdhtml "github.com/gomarkdown/markdown/html"
 	"github.com/gomarkdown/markdown/parser"
 )
 
@@ -38,49 +42,54 @@ var Template = `
     <link rel="preload" href="/account.png" as="image">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,opsz,wght@0,6..12,200..1000;1,6..12,200..1000&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:ital,opsz,wght@0,6..12,200..1000;1,6..12,200..1000&family=Walter+Turncoat&display=swap" rel="stylesheet">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/mu.css">
     <script src="/mu.js"></script>
   </head>
   <body%s>
-    <div id="head">
-      <div id="brand">
-        <a href="/">Mu</a>
-      </div>
-      <div id="account">
-        <a id="account-header" href="/account" style="display: none;"><img src="/account.png" width="24" height="24" style="vertical-align: middle;"><span class="label">Account</span></a>
-      </div>
-    </div>
-    <div id="container">
-      <div id="nav-container">
-        <div id="nav">
-					<div id="nav-logged-in">
-						<a href="/home"><img src="/home.png" style="margin-bottom: 1px"><span class="label">Home</span></a>
-						<a href="/chat"><img src="/chat.png"><span class="label">Chat</span></a>
-						<a href="/news"><img src="/news.png"><span class="label">News</span></a>
-						<a href="/posts"><img src="/post.png"><span class="label">Posts</span></a>
-						<a href="/video"%s><img src="/video.png"><span class="label">Video</span></a>
-					</div>
-					<div id="nav-logged-out" style="display: none;">
-						<a href="/login"><button>Login</button></a>
-						<a href="/signup"><button>Signup</button></a>
-					</div>
+    <div id="paper-texture"></div>
+    <div id="app-layer">
+      <div id="head">
+        <div id="brand">
+          <a href="/">Mu</a>
         </div>
       </div>
-      <div id="content">
-        <h1 id="page-title">%s</h1>
-        %s
+      <div id="container">
+        <div id="nav-container">
+          <div id="nav">
+            <div id="nav-logged-in">
+              <a href="/home"><img src="/home.png" style="margin-bottom: 1px"><span class="label">Home</span></a>
+              <a href="/chat"><img src="/chat.png"><span class="label">Chat</span></a>
+              <a href="/news"><img src="/news.png"><span class="label">News</span></a>
+              <a href="/posts"><img src="/post.png"><span class="label">Posts</span></a>
+              <a href="/video"%s><img src="/video.png"><span class="label">Video</span></a>
+              <a href="/settings"><img src="/account.png"><span class="label">Settings</span></a>
+            </div>
+          </div>
+        </div>
+        <div id="content">
+          <h1 id="page-title">%s</h1>
+          %s
+        </div>
       </div>
     </div>
-  <script>
+    <svg aria-hidden="true" style="position: absolute; width: 0; height: 0; overflow: hidden;" version="1.1" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <filter id="wavy2">
+          <feTurbulence type="fractalNoise" baseFrequency="0.02" numOctaves="5" result="noise" />
+          <feDisplacementMap in="SourceGraphic" in2="noise" scale="15" />
+        </filter>
+      </defs>
+    </svg>
+    <script>
       if (navigator.serviceWorker) {
-        navigator.serviceWorker.register (
+        navigator.serviceWorker.register(
           '/mu.js',
           {scope: '/'}
         );
       }
-  </script>
+    </script>
   </body>
 </html>
 `
@@ -238,7 +247,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// return to home
-		http.Redirect(w, r, "/home", 302)
+		http.Redirect(w, r, "/home", http.StatusFound)
 		return
 	}
 }
@@ -334,7 +343,7 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// return to home
-		http.Redirect(w, r, "/home", 302)
+		http.Redirect(w, r, "/home", http.StatusFound)
 		return
 	}
 }
@@ -348,7 +357,7 @@ func Account(w http.ResponseWriter, r *http.Request) {
 
 	acc, err := auth.GetAccount(sess.Account)
 	if err != nil {
-		http.Error(w, "Account not found", http.StatusNotFound)
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 
@@ -358,7 +367,6 @@ func Account(w http.ResponseWriter, r *http.Request) {
 		newLang := r.Form.Get("language")
 		if _, ok := SupportedLanguages[newLang]; ok {
 			acc.Language = newLang
-			auth.UpdateAccount(acc)
 		}
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
 		return
@@ -404,19 +412,18 @@ func Account(w http.ResponseWriter, r *http.Request) {
 		<p><strong>Username:</strong> %s</p>
 		<p><strong>Name:</strong> %s</p>
 		<p><strong>Member since:</strong> %s</p>
-		<p style="margin-top: 10px;"><a href="/@%s"><button>Public Profile</button></a></p>
-		
+		<p style="margin-top: 10px;"><em>Accounts are disabled in local mode.</em></p>
+
 		<div style="margin-top: 20px;">%s</div>
-		
+
 		<div style="margin-top: 20px;">%s</div>
-		
+
 		<hr style="margin: 20px 0;">
 		<p><a href="/logout"><button style="display: inline-flex; align-items: center; gap: 8px; background: #000; color: #fff; border: 1px solid #000;"><img src="/logout.png" width="16" height="16" style="vertical-align: middle; filter: brightness(0) invert(1);">Logout</button></a></p>
 		</div>`,
 		acc.ID,
 		acc.Name,
 		acc.Created.Format("January 2, 2006"),
-		acc.ID,
 		membershipSection,
 		languageSection,
 	)
@@ -425,10 +432,150 @@ func Account(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(html))
 }
 
+// Settings lets a logged-in user manage API keys needed by optional services.
+func Settings(w http.ResponseWriter, r *http.Request) {
+	status := ""
+	if r.Method == http.MethodPost {
+		r.ParseForm()
+		current := config.Get()
+		current.YouTubeAPIKey = strings.TrimSpace(r.Form.Get("youtube_api_key"))
+		current.FanarAPIKey = strings.TrimSpace(r.Form.Get("fanar_api_key"))
+		src := strings.TrimSpace(r.Form.Get("reminder_source"))
+		if src == "" {
+			src = "quran"
+		}
+		current.ReminderSource = src
+		current.NewsSources = r.Form["news_sources"]
+
+		// Handle nested feed updates if necessary
+		// For now we just save the selection in config
+
+		if err := config.Update(current); err != nil {
+			status = fmt.Sprintf(`<p style="color: red;">Failed to save settings: %s</p>`, htmlstd.EscapeString(err.Error()))
+		} else {
+			status = `<p style="color: green;">Settings saved. Feeds are refreshing...</p>`
+		}
+	}
+
+	current := config.Get()
+	selected := func(cur, val string) string {
+		if cur == val {
+			return "selected"
+		}
+		return ""
+	}
+
+	// Build news source selector
+	availableNews := readNewsSourcesNested()
+	categories := make([]string, 0, len(availableNews))
+	for k := range availableNews {
+		categories = append(categories, k)
+	}
+	sort.Strings(categories)
+
+	selectedNews := make(map[string]bool)
+	for _, s := range current.NewsSources {
+		selectedNews[s] = true
+	}
+
+	var newsChecks strings.Builder
+	for _, cat := range categories {
+		newsChecks.WriteString(fmt.Sprintf(`<div style="margin-bottom: 15px;"><h4>%s</h4>`, htmlstd.EscapeString(cat)))
+
+		sources := availableNews[cat]
+		srcNames := make([]string, 0, len(sources))
+		for k := range sources {
+			srcNames = append(srcNames, k)
+		}
+		sort.Strings(srcNames)
+
+		for _, name := range srcNames {
+			id := cat + "|" + name
+			check := ""
+			if selectedNews[id] || len(selectedNews) == 0 {
+				check = "checked"
+			}
+			fmt.Fprintf(
+				&newsChecks,
+				`<label class="news-source" style="margin-bottom: 5px;">
+					<input type="checkbox" name="news_sources" value="%s" %s>
+					<span class="news-name" title="%s">%s</span>
+				</label>`,
+				htmlstd.EscapeString(id),
+				check,
+				htmlstd.EscapeString(sources[name]),
+				htmlstd.EscapeString(name),
+			)
+		}
+		newsChecks.WriteString("</div>")
+	}
+
+	codexStatus := "Not detected on PATH. Install via <code>npm i -g @openai/codex</code> and run <code>codex login</code>."
+	if _, err := exec.LookPath("codex"); err == nil {
+		codexStatus = "Codex CLI detected on PATH. Mu will use it by default for chat."
+	}
+
+	content := fmt.Sprintf(`<div style="max-width: 680px;">
+		<h2>API Keys</h2>
+		<p>Keys are stored locally on this server at <code>$HOME/.mu/data/settings.json</code>. Use them to enable integrations like YouTube and Fanar.</p>
+		%s
+		<form action="/settings" method="POST" style="margin-top: 16px;">
+			<label for="youtube_api_key"><strong>YouTube Data API key</strong></label><br>
+			<input id="youtube_api_key" name="youtube_api_key" type="password" placeholder="YOUTUBE_API_KEY" value="%s" style="width: 100%%; padding: 8px; margin: 4px 0 12px 0;">
+			<p style="color: #555;">Required for the Video micro-app. Create one in Google Cloud Console.</p>
+
+			<label for="fanar_api_key"><strong>Fanar API key (optional)</strong></label><br>
+			<input id="fanar_api_key" name="fanar_api_key" type="password" placeholder="FANAR_API_KEY" value="%s" style="width: 100%%; padding: 8px; margin: 4px 0 12px 0;">
+			<p style="color: #555;">Optional fallback LLM backend. Leave empty to use Codex.</p>
+
+			<h3>Reminder Source</h3>
+			<p>Choose the source for the daily verse on the home page.</p>
+			<select id="reminder_source" name="reminder_source" style="width: 100%%; padding: 8px; margin: 4px 0 12px 0;">
+				<option value="quran" %s>Quran (reminder.dev)</option>
+				<option value="bible" %s>Bible (OurManna daily)</option>
+				<option value="zen" %s>Zen Quotes (zenquotes.io)</option>
+			</select>
+
+			<h3>News Sources</h3>
+			<p>Select which feeds to use. Edit <code>news/feeds.json</code> to add/remove options, then toggle them here.</p>
+			<div class="news-sources">%s</div>
+
+			<h3>Codex CLI</h3>
+			<p>%s</p>
+
+			<button type="submit" style="margin-top: 12px;">Save</button>
+		</form>
+	</div>`,
+		status,
+		htmlstd.EscapeString(current.YouTubeAPIKey),
+		htmlstd.EscapeString(current.FanarAPIKey),
+		selected(current.ReminderSource, "quran"),
+		selected(current.ReminderSource, "bible"),
+		selected(current.ReminderSource, "zen"),
+		newsChecks.String(),
+		codexStatus,
+	)
+
+	page := RenderHTMLForRequest("Settings", "Configure Mu", content, r)
+	w.Write([]byte(page))
+}
+
+func readNewsSourcesNested() map[string]map[string]string {
+	b, err := os.ReadFile("news/feeds.json")
+	if err != nil {
+		return map[string]map[string]string{}
+	}
+	var m map[string]map[string]string
+	if err := json.Unmarshal(b, &m); err != nil {
+		return map[string]map[string]string{}
+	}
+	return m
+}
+
 func Logout(w http.ResponseWriter, r *http.Request) {
 	sess, err := auth.GetSession(r)
 	if err != nil {
-		http.Redirect(w, r, "/home", 302)
+		http.Redirect(w, r, "/home", http.StatusFound)
 		return
 	}
 
@@ -444,14 +591,20 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 		Secure: secure,
 	})
 	auth.Logout(sess.Token)
-	http.Redirect(w, r, "/home", 302)
+	http.Redirect(w, r, "/home", http.StatusFound)
 }
 
 // Session handler
 func Session(w http.ResponseWriter, r *http.Request) {
 	sess, err := auth.GetSession(r)
 	if err != nil {
-		http.Error(w, err.Error(), 401)
+		// No session: return a guest session instead of an error to avoid client redirects
+		guest := map[string]interface{}{
+			"type": "guest",
+		}
+		b, _ := json.Marshal(guest)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
 		return
 	}
 
@@ -513,7 +666,7 @@ func Membership(w http.ResponseWriter, r *http.Request) {
 
 	<h3>Support Through Donation</h3>
 	<p>Prefer to make a one-time donation? <a href="/donate">Make a donation</a> to support Mu.</p>`
-	html := RenderHTML("Membership", "Support Mu", content)
+		html := RenderHTML("Membership", "Support Mu", content)
 		w.Write([]byte(html))
 		return
 	}
@@ -554,7 +707,7 @@ func Membership(w http.ResponseWriter, r *http.Request) {
 
 	<h3>Support Through Donation</h3>
 	<p>Prefer to make a one-time donation? <a href="/donate">Make a donation</a> to support Mu.</p>`,
-	membershipStatus,
+		membershipStatus,
 		func() string {
 			if !acc.Member {
 				return `<h3>Become a Member</h3>
@@ -616,9 +769,9 @@ func Render(md []byte) []byte {
 	doc := p.Parse(md)
 
 	// create HTML renderer with extensions
-	htmlFlags := html.CommonFlags | html.HrefTargetBlank
-	opts := html.RendererOptions{Flags: htmlFlags}
-	renderer := html.NewRenderer(opts)
+	htmlFlags := mdhtml.CommonFlags | mdhtml.HrefTargetBlank
+	opts := mdhtml.RendererOptions{Flags: htmlFlags}
+	renderer := mdhtml.NewRenderer(opts)
 
 	return markdown.Render(doc, renderer)
 }

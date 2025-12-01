@@ -1,10 +1,38 @@
 {
-  "Crypto": "https://www.coindesk.com/arc/outboundfeeds/rss",
-  "UK": "https://feeds.bbci.co.uk/news/rss.xml",
-  "World": "https://www.aljazeera.com/xml/rss/all.xml",
-  "Finance": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
-  "Tech": "https://techcrunch.com/feed/",
-  "Politics": "https://www.theguardian.com/politics/rss",
-  "Dev": "https://news.ycombinator.com/rss",
-  "Islam": "https://reminder.dev/rss"
+  "Crypto": {
+    "CoinDesk": "https://www.coindesk.com/arc/outboundfeeds/rss"
+  },
+  "Dev": {
+    "Hacker News": "https://news.ycombinator.com/rss"
+  },
+  "Finance": {
+    "CNBC": "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114",
+    "Kagi Business": "https://kite.kagi.com/business.xml"
+  },
+  "Gaming": {
+    "Kagi Gaming": "https://kite.kagi.com/gaming.xml"
+  },
+  "Politics": {
+    "The Guardian": "https://www.theguardian.com/politics/rss"
+  },
+  "Science": {
+    "Kagi Science": "https://kite.kagi.com/science.xml"
+  },
+  "Sports": {
+    "Kagi Sports": "https://kite.kagi.com/sports.xml"
+  },
+  "Tech": {
+    "TechCrunch": "https://techcrunch.com/feed/",
+    "Kagi Tech": "https://kite.kagi.com/tech.xml"
+  },
+  "UK": {
+    "BBC News": "https://feeds.bbci.co.uk/news/rss.xml"
+  },
+  "USA": {
+    "Kagi USA": "https://kite.kagi.com/usa.xml"
+  },
+  "World": {
+    "Al Jazeera": "https://www.aljazeera.com/xml/rss/all.xml",
+    "Kagi World": "https://kite.kagi.com/world.xml"
+  }
 }

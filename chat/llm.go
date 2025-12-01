@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"text/template"
 )
 
@@ -25,12 +26,18 @@ Format responses in markdown.
 
 type LLM struct{}
 
-func askLLM(prompt *Prompt) (string, error) {
+func askLLM(ctx context.Context, prompt *Prompt) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := chatContext(ctx)
+	defer cancel()
+
 	m := new(Model)
-	return m.Generate(prompt)
+	return m.Generate(ctx, prompt)
 }
 
-// AskLLM is the exported version for use by other packages
+// AskLLM is the exported version for use by other packages.
 func AskLLM(prompt *Prompt) (string, error) {
-	return askLLM(prompt)
+	return askLLM(context.Background(), prompt)
 }

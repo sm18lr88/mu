@@ -1,29 +1,32 @@
 package chat
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"mu/admin"
 	"mu/app"
 	"mu/auth"
 	"mu/blog"
 	"mu/data"
+
+	"github.com/gorilla/websocket"
 )
 
 //go:embed *.json
 var f embed.FS
 
 type Prompt struct {
-	System   string   `json:"system"`   // System prompt override
+	System   string   `json:"system"` // System prompt override
 	Rag      []string `json:"rag"`
 	Context  History  `json:"context"`
 	Question string   `json:"question"`
@@ -59,6 +62,8 @@ var topics = []string{}
 
 var head string
 
+var llmTrigger = regexp.MustCompile(`(?i)\b(mu|ai|bot)\b`)
+
 // WebSocket upgrader
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -70,17 +75,17 @@ var upgrader = websocket.Upgrader{
 
 // ChatRoom represents a discussion room for a specific item
 type ChatRoom struct {
-	ID          string                 // e.g., "post_123", "news_456", "video_789"
-	Type        string                 // "post", "news", "video"
-	Title       string                 // Item title
-	Summary     string                 // Item summary/description
-	URL         string                 // Original item URL
-	Messages    []RoomMessage          // Last 20 messages
-	Clients     map[*websocket.Conn]*Client // Connected clients
-	Broadcast   chan RoomMessage       // Broadcast channel
-	Register    chan *Client           // Register client
-	Unregister  chan *Client           // Unregister client
-	mutex       sync.RWMutex
+	ID         string                      // e.g., "post_123", "news_456", "video_789"
+	Type       string                      // "post", "news", "video"
+	Title      string                      // Item title
+	Summary    string                      // Item summary/description
+	URL        string                      // Original item URL
+	Messages   []RoomMessage               // Last 20 messages
+	Clients    map[*websocket.Conn]*Client // Connected clients
+	Broadcast  chan RoomMessage            // Broadcast channel
+	Register   chan *Client                // Register client
+	Unregister chan *Client                // Unregister client
+	mutex      sync.RWMutex
 }
 
 // RoomMessage represents a message in a chat room
@@ -186,12 +191,12 @@ func (room *ChatRoom) broadcastUserList() {
 		usernames = append(usernames, client.UserID)
 	}
 	room.mutex.RUnlock()
-	
+
 	userListMsg := map[string]interface{}{
 		"type":  "user_list",
 		"users": usernames,
 	}
-	
+
 	room.mutex.RLock()
 	for conn := range room.Clients {
 		conn.WriteJSON(userListMsg)
@@ -207,7 +212,7 @@ func (room *ChatRoom) run() {
 			room.mutex.Lock()
 			room.Clients[client.Conn] = client
 			room.mutex.Unlock()
-			
+
 			// Broadcast updated user list
 			room.broadcastUserList()
 
@@ -218,7 +223,7 @@ func (room *ChatRoom) run() {
 				client.Conn.Close()
 			}
 			room.mutex.Unlock()
-			
+
 			// Broadcast updated user list
 			room.broadcastUserList()
 
@@ -245,6 +250,11 @@ func (room *ChatRoom) run() {
 	}
 }
 
+// shouldTriggerLLM returns true if the message explicitly calls for the bot
+func shouldTriggerLLM(msg string) bool {
+	return llmTrigger.MatchString(msg)
+}
+
 // handleWebSocket handles WebSocket connections for chat rooms
 func handleWebSocket(w http.ResponseWriter, r *http.Request, room *ChatRoom) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -253,22 +263,17 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, room *ChatRoom) {
 		return
 	}
 
-	// Get user session
-	sess, err := auth.GetSession(r)
-	if err != nil {
-		conn.Close()
-		return
-	}
-
-	acc, err := auth.GetAccount(sess.Account)
-	if acc == nil || err != nil {
-		conn.Close()
-		return
+	// Get user session; fall back to anonymous if not available.
+	accID := "guest"
+	if sess, err := auth.GetSession(r); err == nil {
+		if acc, err := auth.GetAccount(sess.Account); err == nil && acc != nil {
+			accID = acc.ID
+		}
 	}
 
 	client := &Client{
 		Conn:   conn,
-		UserID: acc.ID,
+		UserID: accID,
 		Room:   room,
 	}
 
@@ -314,64 +319,66 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request, room *ChatRoom) {
 					}
 					room.Broadcast <- userMsg
 
-					// Then invoke LLM and broadcast response
-					go func() {
-						// Build context from room details
-						var ragContext []string
-						
-						// Add room context first (most important)
-						if room.Title != "" || room.Summary != "" {
-							roomContext := ""
-							if room.Title != "" {
-								roomContext = "Discussion topic: " + room.Title
-							}
-							if room.Summary != "" {
-								if roomContext != "" {
-									roomContext += ". "
+					// Only invoke the LLM when explicitly triggered
+					if shouldTriggerLLM(content) {
+						go func() {
+							// Build context from room details
+							var ragContext []string
+
+							// Add room context first (most important)
+							if room.Title != "" || room.Summary != "" {
+								roomContext := ""
+								if room.Title != "" {
+									roomContext = "Discussion topic: " + room.Title
 								}
-								roomContext += room.Summary
+								if room.Summary != "" {
+									if roomContext != "" {
+										roomContext += ". "
+									}
+									roomContext += room.Summary
+								}
+								if room.URL != "" {
+									roomContext += " (Source: " + room.URL + ")"
+								}
+								ragContext = append(ragContext, roomContext)
 							}
-							if room.URL != "" {
-								roomContext += " (Source: " + room.URL + ")"
-							}
-							ragContext = append(ragContext, roomContext)
-						}
-						
-						// Search for additional context (only if needed)
-						searchQuery := content
-						if room.Title != "" {
-							searchQuery = room.Title + " " + content
-						}
-						
-						ragEntries := data.Search(searchQuery, 2) // Reduced to 2 since room context is primary
-						for _, entry := range ragEntries {
-							contextStr := fmt.Sprintf("%s: %s", entry.Title, entry.Content)
-							if len(contextStr) > 500 {
-								contextStr = contextStr[:500]
-							}
-							if url, ok := entry.Metadata["url"].(string); ok && len(url) > 0 {
-								contextStr += fmt.Sprintf(" (Source: %s)", url)
-							}
-							ragContext = append(ragContext, contextStr)
-						}
 
-						prompt := &Prompt{
-							Rag:      ragContext,
-							Context:  nil, // No history in rooms for now
-							Question: content,
-						}
-
-						resp, err := askLLM(prompt)
-						if err == nil && len(resp) > 0 {
-							llmMsg := RoomMessage{
-								UserID:    "AI",
-								Content:   resp,
-								Timestamp: time.Now(),
-								IsLLM:     true,
+							// Search for additional context (only if needed)
+							searchQuery := content
+							if room.Title != "" {
+								searchQuery = room.Title + " " + content
 							}
-							room.Broadcast <- llmMsg
-						}
-					}()
+
+							ragEntries := data.Search(searchQuery, 2) // Reduced to 2 since room context is primary
+							for _, entry := range ragEntries {
+								contextStr := fmt.Sprintf("%s: %s", entry.Title, entry.Content)
+								if len(contextStr) > 500 {
+									contextStr = contextStr[:500]
+								}
+								if url, ok := entry.Metadata["url"].(string); ok && len(url) > 0 {
+									contextStr += fmt.Sprintf(" (Source: %s)", url)
+								}
+								ragContext = append(ragContext, contextStr)
+							}
+
+							prompt := &Prompt{
+								Rag:      ragContext,
+								Context:  nil, // No history in rooms for now
+								Question: content,
+							}
+
+							resp, err := askLLM(context.Background(), prompt)
+							if err == nil && len(resp) > 0 {
+								llmMsg := RoomMessage{
+									UserID:    "AI",
+									Content:   resp,
+									Timestamp: time.Now(),
+									IsLLM:     true,
+								}
+								room.Broadcast <- llmMsg
+							}
+						}()
+					}
 				}
 			}
 		}
@@ -385,7 +392,7 @@ func Load() {
 		fmt.Println("Error parsing topics.json", err)
 	}
 
-	for topic, _ := range prompts {
+	for topic := range prompts {
 		topics = append(topics, topic)
 	}
 
@@ -393,7 +400,7 @@ func Load() {
 
 	// Generate head with topics (rooms will be added dynamically)
 	head = app.Head("chat", topics)
-	
+
 	// Register LLM analyzer for content moderation
 	admin.SetAnalyzer(&llmAnalyzer{})
 
@@ -426,7 +433,7 @@ func generateSummaries() {
 			ragContext = append(ragContext, contentStr)
 		}
 
-		resp, err := askLLM(&Prompt{
+		resp, err := askLLM(context.Background(), &Prompt{
 			Rag:      ragContext,
 			Question: prompt,
 		})
@@ -457,7 +464,7 @@ func generateSummaries() {
 func Handler(w http.ResponseWriter, r *http.Request) {
 	// Check if this is a room-based chat (e.g., /chat?id=post_123)
 	roomID := r.URL.Query().Get("id")
-	
+
 	// Check if this is a WebSocket upgrade request
 	if r.Header.Get("Upgrade") == "websocket" && roomID != "" {
 		room := getOrCreateRoom(roomID)
@@ -524,7 +531,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			if len(msg) == 0 {
 				return
 			}
-			
+
 			var ictx interface{}
 			json.Unmarshal([]byte(ctx), &ictx)
 			form["context"] = ictx
@@ -554,7 +561,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(strings.TrimSpace(q), "@") {
 			// Direct message - don't invoke LLM, just echo back
 			form["answer"] = "<p><em>Message sent. Direct messages are visible to everyone in this topic.</em></p>"
-			
+
 			// if JSON request then respond with json
 			if ct := r.Header.Get("Content-Type"); ct == "application/json" {
 				b, _ := json.Marshal(form)
@@ -591,7 +598,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		for _, entry := range ragEntries {
 			// Debug: Show raw entry
 			fmt.Printf("[RAG DEBUG] Entry: Type=%s, Title=%s, Content=%s\n", entry.Type, entry.Title, entry.Content)
-			
+
 			// Format each entry as context
 			contextStr := fmt.Sprintf("%s: %s", entry.Title, entry.Content)
 			if len(contextStr) > 500 {
@@ -602,7 +609,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			}
 			ragContext = append(ragContext, contextStr)
 		}
-		
+
 		// Debug: Log what we found
 		if len(ragEntries) > 0 {
 			fmt.Printf("[RAG] Query: %s\n", searchQuery)
@@ -625,7 +632,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// query the llm
-		resp, err := askLLM(prompt)
+		resp, err := askLLM(r.Context(), prompt)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -669,5 +676,5 @@ func (a *llmAnalyzer) Analyze(promptText, question string) (string, error) {
 		Context:  nil,
 		Rag:      nil,
 	}
-	return askLLM(prompt)
+	return askLLM(context.Background(), prompt)
 }
