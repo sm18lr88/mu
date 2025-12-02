@@ -2,7 +2,7 @@
 
 Local-first, ad-free personal hub. This fork experiments with a papyrus theme and is not production-ready.
 
-<img width="1136" height="863" alt="image" src="https://github.com/user-attachments/assets/78b1ebc1-4c80-4c59-94a2-95bccab98a17" />
+<img width="885" height="610" alt="image" src="https://github.com/user-attachments/assets/6a1a2ad5-39d2-42b1-b0b1-8dd2dbff451f" />
 
 Support app author by using the free hosted version at [mu.xyz](https://mu.xyz)
 
@@ -47,3 +47,9 @@ Support app author by using the free hosted version at [mu.xyz](https://mu.xyz)
 ## Motivation
 
 Rebuild everyday services without ads, tracking, or engagement tricks—so the tools work for you.
+
+## Additional screenshots
+
+<img width="1445" height="891" alt="image" src="https://github.com/user-attachments/assets/367d643b-0fb2-41d6-804c-974426bba2d7" />
+
+<img width="658" height="940" alt="image" src="https://github.com/user-attachments/assets/7c3b1f85-f777-481d-a623-e4dcd5896954" />
