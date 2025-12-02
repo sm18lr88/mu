@@ -2,11 +2,14 @@ package data
 
 import (
 	"bytes"
+	"container/heap"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -74,6 +78,12 @@ var (
 
 	embeddingCacheMu sync.RWMutex
 	embeddingCache   = make(map[string][]float64)
+
+	embeddingsEnabled atomic.Bool
+	embeddingClient   = &http.Client{Timeout: 5 * time.Second}
+
+	persistRequestCh = make(chan struct{}, 1)
+	persistFlushCh   = make(chan chan struct{})
 )
 
 // IndexEntry represents a searchable piece of content
@@ -82,6 +92,8 @@ type IndexEntry struct {
 	Type          string                 `json:"type"` // "news", "video", "market", "reminder"
 	Title         string                 `json:"title"`
 	Content       string                 `json:"content"`
+	TitleLower    string                 `json:"title_lower,omitempty"`
+	ContentLower  string                 `json:"content_lower,omitempty"`
 	Metadata      map[string]interface{} `json:"metadata"`
 	Embedding     []float64              `json:"embedding"`      // Vector embedding for semantic search
 	EmbeddingHash string                 `json:"embedding_hash"` // Hash of embedded text to avoid recompute
@@ -92,6 +104,116 @@ type IndexEntry struct {
 type SearchResult struct {
 	Entry *IndexEntry
 	Score float64
+}
+
+type resultHeap []SearchResult
+
+func (h resultHeap) Len() int           { return len(h) }
+func (h resultHeap) Less(i, j int) bool { return h[i].Score < h[j].Score }
+func (h resultHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *resultHeap) Push(x interface{}) {
+	*h = append(*h, x.(SearchResult))
+}
+func (h *resultHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[0 : n-1]
+	return item
+}
+
+const (
+	defaultEmbedModel = "qwen3-embedding:0.6b"
+	persistDelay      = 200 * time.Millisecond
+)
+
+var errEmbeddingsDisabled = errors.New("embeddings disabled")
+
+func init() {
+	embeddingsEnabled.Store(true)
+
+	if reason, ok := embeddingsDisabledByEnv(); ok {
+		disableEmbeddings(reason)
+	}
+
+	go persistWorker()
+}
+
+func embeddingsDisabledByEnv() (string, bool) {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("MU_DISABLE_EMBEDDINGS"))); v == "1" || v == "true" || v == "yes" || v == "on" {
+		return "disabled via MU_DISABLE_EMBEDDINGS", true
+	}
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("MU_EMBEDDINGS"))); v == "off" {
+		return "disabled via MU_EMBEDDINGS=off", true
+	}
+	return "", false
+}
+
+func disableEmbeddings(reason string) {
+	if embeddingsEnabled.CompareAndSwap(true, false) && reason != "" {
+		fmt.Printf("[data] Embeddings disabled: %s\n", reason)
+	}
+}
+
+func persistWorker() {
+	var timer *time.Timer
+
+	for {
+		var timerC <-chan time.Time
+		if timer != nil {
+			timerC = timer.C
+		}
+
+		select {
+		case <-persistRequestCh:
+			if timer == nil {
+				timer = time.NewTimer(persistDelay)
+				continue
+			}
+
+			if !timer.Stop() {
+				<-timer.C
+			}
+			timer.Reset(persistDelay)
+
+		case done := <-persistFlushCh:
+			if timer != nil {
+				if !timer.Stop() {
+					<-timer.C
+				}
+				timer = nil
+			}
+			saveIndex()
+			close(done)
+
+		case <-timerC:
+			saveIndex()
+			timer = nil
+		}
+	}
+}
+
+func schedulePersist() {
+	select {
+	case persistRequestCh <- struct{}{}:
+	default:
+	}
+}
+
+// FlushIndex forces a synchronous persistence of the index to disk.
+func FlushIndex() {
+	done := make(chan struct{})
+	persistFlushCh <- done
+	<-done
+}
+
+func ensureLowerFields(entry *IndexEntry) {
+	if entry.TitleLower == "" {
+		entry.TitleLower = strings.ToLower(entry.Title)
+	}
+	if entry.ContentLower == "" {
+		entry.ContentLower = strings.ToLower(entry.Content)
+	}
 }
 
 // Index adds or updates an entry in the search index
@@ -114,12 +236,14 @@ func Index(id, entryType, title, content string, metadata map[string]interface{}
 	}
 
 	entry := &IndexEntry{
-		ID:        id,
-		Type:      entryType,
-		Title:     title,
-		Content:   content,
-		Metadata:  metadata,
-		IndexedAt: time.Now(),
+		ID:           id,
+		Type:         entryType,
+		Title:        title,
+		TitleLower:   strings.ToLower(title),
+		Content:      content,
+		ContentLower: strings.ToLower(content),
+		Metadata:     metadata,
+		IndexedAt:    time.Now(),
 	}
 
 	// Generate embedding for semantic search
@@ -158,7 +282,7 @@ func Index(id, entryType, title, content string, metadata map[string]interface{}
 	indexMutex.Unlock()
 
 	// Persist to disk
-	saveIndex()
+	schedulePersist()
 }
 
 // GetByID retrieves an entry by its exact ID
@@ -171,86 +295,59 @@ func GetByID(id string) *IndexEntry {
 // Search performs semantic vector search with keyword fallback
 func Search(query string, limit int) []*IndexEntry {
 	indexMutex.RLock()
-	defer indexMutex.RUnlock()
-
-	// Try vector search first
-	queryLower := strings.ToLower(query)
-	queryEmbedding, err := getEmbedding(query)
-	if err == nil && len(queryEmbedding) > 0 {
-		fmt.Printf("[SEARCH] Using vector search for: %s\n", query)
-		var results []SearchResult
-
-		for _, entry := range index {
-			if len(entry.Embedding) == 0 {
-				continue // Skip entries without embeddings
-			}
-
-			similarity := cosineSimilarity(queryEmbedding, entry.Embedding)
-			if similarity > 0.3 {
-				titleLower := strings.ToLower(entry.Title)
-				contentLower := strings.ToLower(entry.Content)
-
-				// Require either a text hit or a stronger semantic score
-				if !strings.Contains(titleLower, queryLower) && !strings.Contains(contentLower, queryLower) && similarity < 0.6 {
-					continue
-				}
-
-				results = append(results, SearchResult{Entry: entry, Score: similarity})
-			}
-		}
-
-		// Sort by similarity descending
-		sort.Slice(results, func(i, j int) bool {
-			return results[i].Score > results[j].Score
-		})
-
-		// Return top N results
-		if limit > 0 && len(results) > limit {
-			results = results[:limit]
-		}
-
-		entries := make([]*IndexEntry, len(results))
-		for i, r := range results {
-			entries[i] = r.Entry
-		}
-
-		if len(entries) > 0 {
-			return entries
-		}
-	}
-
-	// Fallback: Simple text matching if vector search fails or returns no results
-	fmt.Printf("[SEARCH] Using text fallback for: %s\n", query)
-	var results []SearchResult
-
+	snapshot := make([]*IndexEntry, 0, len(index))
 	for _, entry := range index {
-		score := 0.0
-		titleLower := strings.ToLower(entry.Title)
-		contentLower := strings.ToLower(entry.Content)
+		snapshot = append(snapshot, entry)
+	}
+	indexMutex.RUnlock()
 
-		// Simple contains matching
-		if strings.Contains(titleLower, queryLower) {
-			score = 3.0
-		} else if strings.Contains(contentLower, queryLower) {
-			score = 1.0
-		}
+	if len(snapshot) == 0 {
+		return nil
+	}
 
-		if score > 0 {
-			results = append(results, SearchResult{
-				Entry: entry,
-				Score: score,
-			})
+	queryLower := strings.ToLower(query)
+
+	useVectors := embeddingsEnabled.Load()
+	var queryEmbedding []float64
+	if useVectors {
+		var err error
+		queryEmbedding, err = getEmbedding(query)
+		if err != nil || len(queryEmbedding) == 0 {
+			useVectors = false
 		}
 	}
 
-	// Sort by score descending
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
-	})
+	if limit <= 0 || limit > len(snapshot) {
+		limit = len(snapshot)
+	}
 
-	// Return top N results
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
+	h := &resultHeap{}
+	heap.Init(h)
+
+	for _, entry := range snapshot {
+		score := rankEntry(entry, queryLower, queryEmbedding, useVectors)
+		if score <= 0 {
+			continue
+		}
+
+		if h.Len() < limit {
+			heap.Push(h, SearchResult{Entry: entry, Score: score})
+			continue
+		}
+
+		if score > (*h)[0].Score {
+			heap.Pop(h)
+			heap.Push(h, SearchResult{Entry: entry, Score: score})
+		}
+	}
+
+	if h.Len() == 0 {
+		return nil
+	}
+
+	results := make([]SearchResult, h.Len())
+	for i := len(results) - 1; i >= 0; i-- {
+		results[i] = heap.Pop(h).(SearchResult)
 	}
 
 	entries := make([]*IndexEntry, len(results))
@@ -290,7 +387,7 @@ func ClearIndex() {
 	indexMutex.Lock()
 	index = make(map[string]*IndexEntry)
 	indexMutex.Unlock()
-	saveIndex()
+	schedulePersist()
 }
 
 // saveIndex persists the index to disk
@@ -313,6 +410,10 @@ func Load() {
 
 	json.Unmarshal(b, &index)
 
+	for _, entry := range index {
+		ensureLowerFields(entry)
+	}
+
 	// load embedding cache (best-effort)
 	if cacheBytes, err := LoadFile("embedding_cache.json"); err == nil && len(cacheBytes) > 0 {
 		var cache map[string][]float64
@@ -328,10 +429,12 @@ func Load() {
 // VECTOR EMBEDDINGS VIA OLLAMA
 // ============================================
 
-const defaultEmbedModel = "qwen3-embedding:0.6b"
-
 // getEmbedding generates a vector embedding for text using Ollama
 func getEmbedding(text string) ([]float64, error) {
+	if !embeddingsEnabled.Load() {
+		return nil, errEmbeddingsDisabled
+	}
+
 	if strings.TrimSpace(text) == "" {
 		return nil, fmt.Errorf("empty text")
 	}
@@ -365,8 +468,12 @@ func getEmbedding(text string) ([]float64, error) {
 		return nil, err
 	}
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := embeddingClient.Post(url, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			disableEmbeddings(fmt.Sprintf("network error: %v", netErr))
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -424,4 +531,31 @@ func copyEmbeddingCache() map[string][]float64 {
 		cp[k] = v
 	}
 	return cp
+}
+
+func rankEntry(entry *IndexEntry, queryLower string, queryEmbedding []float64, useVectors bool) float64 {
+	var score float64
+
+	if useVectors && len(entry.Embedding) > 0 && len(queryEmbedding) == len(entry.Embedding) {
+		similarity := cosineSimilarity(queryEmbedding, entry.Embedding)
+		if similarity > 0.3 {
+			titleHit := strings.Contains(entry.TitleLower, queryLower)
+			contentHit := strings.Contains(entry.ContentLower, queryLower)
+
+			if titleHit || contentHit || similarity >= 0.6 {
+				score = similarity
+			}
+		}
+	}
+
+	if score == 0 {
+		switch {
+		case strings.Contains(entry.TitleLower, queryLower):
+			score = 3.0
+		case strings.Contains(entry.ContentLower, queryLower):
+			score = 1.0
+		}
+	}
+
+	return score
 }
