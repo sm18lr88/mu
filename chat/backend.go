@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"time"
 
 	"mu/codex"
@@ -19,6 +19,19 @@ import (
 type Backend interface {
 	Ask(ctx context.Context, prompt *Prompt) (string, error)
 }
+
+// disabledBackend is returned when no usable backend is available.
+type disabledBackend struct {
+	reason string
+}
+
+func (d *disabledBackend) Ask(ctx context.Context, prompt *Prompt) (string, error) {
+	return "", errors.New(d.reason)
+}
+
+// backendOverride lets tests and the CLI inject a stub backend.
+// Not exposed outside this package in production code paths.
+var backendOverride Backend
 
 // codexBackend uses the local Codex CLI.
 type codexBackend struct{}
@@ -33,6 +46,9 @@ func (c *codexBackend) Ask(ctx context.Context, prompt *Prompt) (string, error) 
 
 	opt := codex.DefaultOptions()
 	opt.WorkDir = "."
+	model, thinking := currentModelThinking()
+	opt.Model = model             // empty uses Codex defaults
+	opt.ReasoningLevel = thinking // empty uses Codex defaults
 
 	return codex.Ask(ctx, textPrompt, opt)
 }
@@ -113,16 +129,27 @@ func (f *fanarBackend) Ask(ctx context.Context, prompt *Prompt) (string, error) 
 
 // selectBackend chooses the backend based on env / availability.
 func selectBackend() Backend {
+	if backendOverride != nil {
+		return backendOverride
+	}
+
 	fanarKey := config.Get().FanarAPIKey
+	noBackendReason := "chat backend unavailable: install Codex CLI (npm i -g @openai/codex && codex login) or set FANAR_API_KEY"
 
 	switch os.Getenv("MU_CHAT_BACKEND") {
 	case "codex":
-		return &codexBackend{}
+		if codex.HasCodex() {
+			return &codexBackend{}
+		}
+		return &disabledBackend{reason: noBackendReason}
 	case "fanar":
-		return &fanarBackend{}
+		if fanarKey != "" {
+			return &fanarBackend{}
+		}
+		return &disabledBackend{reason: noBackendReason}
 	}
 
-	if _, err := exec.LookPath("codex"); err == nil {
+	if codex.HasCodex() {
 		return &codexBackend{}
 	}
 
@@ -130,7 +157,29 @@ func selectBackend() Backend {
 		return &fanarBackend{}
 	}
 
-	return &codexBackend{}
+	return &disabledBackend{reason: noBackendReason}
+}
+
+// setBackendOverride is used by tests to swap in a fake backend.
+// It returns a reset function to restore the previous backend.
+func setBackendOverride(b Backend) (reset func()) {
+	prev := backendOverride
+	backendOverride = b
+	return func() {
+		backendOverride = prev
+	}
+}
+
+func isBackendDisabled(b Backend) bool {
+	_, ok := b.(*disabledBackend)
+	return ok
+}
+
+func disabledReason(b Backend) string {
+	if d, ok := b.(*disabledBackend); ok {
+		return d.reason
+	}
+	return ""
 }
 
 // chatContext returns a context with a conservative timeout for LLM calls.

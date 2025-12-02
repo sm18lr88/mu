@@ -13,6 +13,12 @@ type Settings struct {
 	FanarAPIKey    string   `json:"fanar_api_key"`
 	ReminderSource string   `json:"reminder_source"`
 	NewsSources    []string `json:"news_sources"`
+
+	// Chat/summaries Codex controls
+	ChatModel       string `json:"chat_model"`
+	ChatThinking    string `json:"chat_thinking"`
+	SummaryModel    string `json:"summary_model"`
+	SummaryThinking string `json:"summary_thinking"`
 }
 
 var (

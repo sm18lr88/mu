@@ -61,7 +61,6 @@ button {
   border: 1px solid #b48a4a;
   border-radius: 5px;
   padding: 10px;
-  cursor: pointer;
   color: #2d1b0f;
   font-weight: 800;
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.7), 0 2px 6px rgba(0,0,0,0.2);
@@ -78,7 +77,7 @@ input {
   border-radius: 5px;
   border: 1px solid #b48a4a;
   box-sizing: border-box;
-  background: var(--paper-base);
+  background: rgba(255, 255, 255, 0.4);
   color: var(--text-color);
 }
 
@@ -537,11 +536,36 @@ hr[id], h1[id], .section h1 {
 /* ========================================
    CHAT PAGE
    ======================================== */
+body:has(#messages) {
+  overflow: hidden;
+}
+
+body:has(#messages) #app-layer {
+  overflow: hidden;
+}
+
+body:has(#messages) #container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  margin-top: 0;
+  overflow: hidden;
+}
+
+body:has(#messages) #nav-container {
+  flex: 0 0 auto;
+}
+
 body:has(#messages) #content {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 50px);
-  padding-bottom: 20px;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-left: 160px;
+  width: calc(100% - 160px);
+  padding: 16px 24px 20px 45px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 #topic-selector {
@@ -606,11 +630,20 @@ body:has(#messages) #content {
 }
 
 #messages {
-  flex-grow: 1;
+  flex: 1 1 auto;
   min-height: 0;
   border-radius: 5px;
   text-align: left;
   overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+#chat-form {
+  flex-shrink: 0;
+  background: transparent;
+  padding: 6px 0 0 0;
+  margin-top: 8px;
+  border-top: none;
 }
 #messages p {
   margin-top: 8px;
@@ -1107,7 +1140,7 @@ body:has(#messages) #content {
 .category {
   font-family: "Walter Turncoat", cursive;
   color: #4a2c16;
-  font-size: 0.6em;
+  font-size: 0.7em;
   font-weight: 700;
   padding: 0 5px 0 0;
   background: transparent;
@@ -1320,7 +1353,7 @@ body:has(#messages) #content {
   #content {
     height: auto;
     display: block;
-    padding: 15px 20px 80px 20px;
+    padding: 10px 12px 120px 12px;
   }
   #main {
     padding: 20px;
@@ -1336,7 +1369,7 @@ body:has(#messages) #content {
     flex: 1 1 0;
     overflow-y: auto;
     min-height: 0;
-    padding-bottom: 0;
+    padding-bottom: 8px;
   }
   /* Prevent container scroll on chat page */
   #messages ~ #chat-form {
@@ -1352,15 +1385,17 @@ body:has(#messages) #content {
   }
   body:has(#messages) #container {
     overflow: hidden;
-    height: 100vh;
+    height: 100%;
     box-sizing: border-box;
   }
   body:has(#messages) #content {
-    height: calc(100vh - 100px);
+    height: 100%;
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    padding: 10px 15px 80px 15px;
+    padding: 8px 10px 10px 10px;
+    margin-left: 0;
+    width: 100%;
     box-sizing: border-box;
   }
   body:has(#messages) #topics {
@@ -1388,9 +1423,10 @@ body:has(#messages) #content {
   }
   #chat-form {
     flex: 0 0 auto;
-    background: white;
-    padding-top: 10px;
+    background: var(--paper-base);
+    padding: 6px 0 0 0;
     margin: 0;
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
   }
   .post-show {
     margin-top: 10px;

@@ -447,6 +447,12 @@ func Settings(w http.ResponseWriter, r *http.Request) {
 		current.ReminderSource = src
 		current.NewsSources = r.Form["news_sources"]
 
+		// Codex settings
+		current.ChatModel = strings.TrimSpace(r.Form.Get("chat_model"))
+		current.ChatThinking = strings.TrimSpace(r.Form.Get("chat_thinking"))
+		current.SummaryModel = strings.TrimSpace(r.Form.Get("summary_model"))
+		current.SummaryThinking = strings.TrimSpace(r.Form.Get("summary_thinking"))
+
 		// Handle nested feed updates if necessary
 		// For now we just save the selection in config
 
@@ -515,6 +521,44 @@ func Settings(w http.ResponseWriter, r *http.Request) {
 		codexStatus = "Codex CLI detected on PATH. Mu will use it by default for chat."
 	}
 
+	// Build Codex model/thinking selectors
+	modelOptions := func(selectedVal string) string {
+		var b strings.Builder
+		for _, val := range config.CodexModels() {
+			sel := ""
+			label := val
+			if val == "" {
+				label = "Default"
+			}
+			if val == selectedVal {
+				sel = " selected"
+			}
+			fmt.Fprintf(&b, `<option value="%s"%s>%s</option>`, htmlstd.EscapeString(val), sel, htmlstd.EscapeString(label))
+		}
+		return b.String()
+	}
+
+	thinkingOptions := func(selectedVal string) string {
+		var b strings.Builder
+		for _, val := range config.CodexThinkingLevels() {
+			sel := ""
+			label := val
+			if val == "" {
+				label = "Default"
+			}
+			if val == selectedVal {
+				sel = " selected"
+			}
+			fmt.Fprintf(&b, `<option value="%s"%s>%s</option>`, htmlstd.EscapeString(val), sel, htmlstd.EscapeString(label))
+		}
+		return b.String()
+	}
+
+	chatModelOpts := modelOptions(current.ChatModel)
+	chatThinkingOpts := thinkingOptions(current.ChatThinking)
+	summaryModelOpts := modelOptions(current.SummaryModel)
+	summaryThinkingOpts := thinkingOptions(current.SummaryThinking)
+
 	content := fmt.Sprintf(`<div style="max-width: 680px;">
 		<h2>API Keys</h2>
 		<p>Keys are stored locally on this server at <code>$HOME/.mu/data/settings.json</code>. Use them to enable integrations like YouTube and Fanar.</p>
@@ -543,6 +587,26 @@ func Settings(w http.ResponseWriter, r *http.Request) {
 			<h3>Codex CLI</h3>
 			<p>%s</p>
 
+			<h3>Codex (Chat)</h3>
+			<div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+				<label style="flex: 1; min-width: 220px;">Model<br>
+					<select name="chat_model" style="width: 100%%; padding: 8px;">%s</select>
+				</label>
+				<label style="flex: 1; min-width: 220px;">Thinking<br>
+					<select name="chat_thinking" style="width: 100%%; padding: 8px;">%s</select>
+				</label>
+			</div>
+
+			<h3>Codex (Summaries)</h3>
+			<div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+				<label style="flex: 1; min-width: 220px;">Model<br>
+					<select name="summary_model" style="width: 100%%; padding: 8px;">%s</select>
+				</label>
+				<label style="flex: 1; min-width: 220px;">Thinking<br>
+					<select name="summary_thinking" style="width: 100%%; padding: 8px;">%s</select>
+				</label>
+			</div>
+
 			<button type="submit" style="margin-top: 12px;">Save</button>
 		</form>
 	</div>`,
@@ -554,6 +618,8 @@ func Settings(w http.ResponseWriter, r *http.Request) {
 		selected(current.ReminderSource, "zen"),
 		newsChecks.String(),
 		codexStatus,
+		chatModelOpts, chatThinkingOpts,
+		summaryModelOpts, summaryThinkingOpts,
 	)
 
 	page := RenderHTMLForRequest("Settings", "Configure Mu", content, r)

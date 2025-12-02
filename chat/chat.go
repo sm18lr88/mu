@@ -17,6 +17,7 @@ import (
 	"mu/app"
 	"mu/auth"
 	"mu/blog"
+	"mu/config"
 	"mu/data"
 
 	"github.com/gorilla/websocket"
@@ -419,6 +420,21 @@ func Load() {
 func generateSummaries() {
 	app.Log("chat", "Generating summaries at %s", time.Now().String())
 
+	// Skip summary generation if no backend is available (avoid log spam on machines without Codex/Fanar).
+	if b := selectBackend(); isBackendDisabled(b) {
+		app.Log("chat", "Skipping summaries: %s", disabledReason(b))
+		go scheduleNextSummaries()
+		return
+	}
+
+	// Use summary-specific model/thinking if set; fall back to chat defaults
+	cfg := config.Get()
+	origModel, origThinking := currentModelThinking()
+	if cfg.SummaryModel != "" || cfg.SummaryThinking != "" {
+		setSummaryModelThinking(cfg.SummaryModel, cfg.SummaryThinking)
+		defer setSummaryModelThinking(origModel, origThinking)
+	}
+
 	newSummaries := map[string]string{}
 
 	for topic, prompt := range prompts {
@@ -458,6 +474,11 @@ func generateSummaries() {
 
 	time.Sleep(time.Hour)
 
+	go generateSummaries()
+}
+
+func scheduleNextSummaries() {
+	time.Sleep(time.Hour)
 	go generateSummaries()
 }
 
@@ -538,21 +559,9 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			form["prompt"] = msg
 		}
 
-		var context History
-
+		var history History
 		if vals := form["context"]; vals != nil {
-			cvals := vals.([]interface{})
-			// Keep only the last 5 messages to reduce context size
-			startIdx := 0
-			if len(cvals) > 5 {
-				startIdx = len(cvals) - 5
-			}
-			for _, val := range cvals[startIdx:] {
-				msg := val.(map[string]interface{})
-				prompt := fmt.Sprintf("%v", msg["prompt"])
-				answer := fmt.Sprintf("%v", msg["answer"])
-				context = append(context, Message{Prompt: prompt, Answer: answer})
-			}
+			history = BuildHistory(vals)
 		}
 
 		q := fmt.Sprintf("%v", form["prompt"])
@@ -587,49 +596,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			topic = fmt.Sprintf("%v", t)
 		}
 
-		// Search the index for relevant context (RAG)
-		// If topic is provided, use it as additional context for search
-		searchQuery := q
-		if len(topic) > 0 {
-			searchQuery = topic + " " + q
-		}
-		ragEntries := data.Search(searchQuery, 3)
-		var ragContext []string
-		for _, entry := range ragEntries {
-			// Debug: Show raw entry
-			app.Log("chat", "[RAG DEBUG] Entry: Type=%s, Title=%s, Content=%s", entry.Type, entry.Title, entry.Content)
-
-			// Format each entry as context
-			contextStr := fmt.Sprintf("%s: %s", entry.Title, entry.Content)
-			if len(contextStr) > 500 {
-				contextStr = contextStr[:500]
-			}
-			if url, ok := entry.Metadata["url"].(string); ok && len(url) > 0 {
-				contextStr += fmt.Sprintf(" (Source: %s)", url)
-			}
-			ragContext = append(ragContext, contextStr)
-		}
-
-		// Debug: Log what we found
-		if len(ragEntries) > 0 {
-			app.Log("chat", "[RAG] Query: %s", searchQuery)
-			app.Log("chat", "[RAG] Found %d entries:", len(ragEntries))
-			for i, entry := range ragEntries {
-				app.Log("chat", "  %d. [%s] %s", i+1, entry.Type, entry.Title)
-			}
-			app.Log("chat", "[RAG] Context being sent to LLM:")
-			for i, ctx := range ragContext {
-				app.Log("chat", "  %d. %s", i+1, ctx)
-			}
-		} else {
-			app.Log("chat", "[RAG] Query: %s - NO RESULTS", searchQuery)
-		}
-
-		prompt := &Prompt{
-			Rag:      ragContext,
-			Context:  context,
-			Question: q,
-		}
+		prompt, searchQuery, ragEntries := BuildPrompt(q, topic, history)
+		logRAG(searchQuery, ragEntries, prompt.Rag)
 
 		// query the llm
 		resp, err := askLLM(r.Context(), prompt)
@@ -663,6 +631,23 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 		w.Write([]byte(renderHTML))
 	}
+}
+
+func logRAG(searchQuery string, ragEntries []*data.IndexEntry, ragContext []string) {
+	if len(ragEntries) > 0 {
+		app.Log("chat", "[RAG] Query: %s", searchQuery)
+		app.Log("chat", "[RAG] Found %d entries:", len(ragEntries))
+		for i, entry := range ragEntries {
+			app.Log("chat", "  %d. [%s] %s", i+1, entry.Type, entry.Title)
+		}
+		app.Log("chat", "[RAG] Context being sent to LLM:")
+		for i, ctx := range ragContext {
+			app.Log("chat", "  %d. %s", i+1, ctx)
+		}
+		return
+	}
+
+	app.Log("chat", "[RAG] Query: %s - NO RESULTS", searchQuery)
 }
 
 // llmAnalyzer implements the admin.LLMAnalyzer interface

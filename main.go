@@ -31,6 +31,10 @@ import (
 var EnvFlag = flag.String("env", "dev", "Set the environment")
 var ServeFlag = flag.Bool("serve", false, "Run the server")
 var AddressFlag = flag.String("address", ":8030", "Address for server")
+var ChatPromptFlag = flag.String("chat", "", "Send a prompt to the chat backend and print the reply (skips server)")
+var ChatTopicFlag = flag.String("chat-topic", "", "Optional topic to bias search context when using --chat")
+var ChatContextFlag = flag.String("chat-context", "", "Path to JSON history (array of {prompt,answer}) for --chat")
+var ChatDebugFlag = flag.Bool("chat-debug", false, "Show RAG context used by --chat")
 
 var loadingPage = []byte(app.RenderHTML(
 	"Loading",
@@ -53,6 +57,10 @@ func normalizeAddress(addr string) string {
 
 func main() {
 	flag.Parse()
+
+	if strings.TrimSpace(*ChatPromptFlag) != "" {
+		os.Exit(runChatCLI())
+	}
 
 	if !*ServeFlag {
 		fmt.Println("--serve not set")
@@ -256,6 +264,58 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		fmt.Printf("Server forced to shutdown: %v\n", err)
 	}
+}
+
+func runChatCLI() int {
+	question := strings.TrimSpace(*ChatPromptFlag)
+	if question == "" {
+		fmt.Fprintln(os.Stderr, "--chat requires a prompt")
+		return 1
+	}
+
+	data.Load()
+	config.Load()
+
+	var history chat.History
+	if path := strings.TrimSpace(*ChatContextFlag); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to read context file %s: %v\n", path, err)
+			return 1
+		}
+		history = chat.BuildHistory(b)
+	}
+
+	prompt, searchQuery, ragEntries := chat.BuildPrompt(question, *ChatTopicFlag, history)
+
+	if *ChatDebugFlag {
+		fmt.Printf("[chat] query: %s\n", searchQuery)
+		if t := strings.TrimSpace(*ChatTopicFlag); t != "" {
+			fmt.Printf("[chat] topic: %s\n", t)
+		}
+		if len(ragEntries) == 0 {
+			fmt.Println("[chat] RAG: no matches")
+		} else {
+			for i, entry := range ragEntries {
+				fmt.Printf("[chat] RAG %d: [%s] %s\n", i+1, entry.Type, entry.Title)
+			}
+		}
+
+		if promptText, err := chat.RenderPromptText(prompt); err == nil {
+			fmt.Printf("[chat] prompt text:\n%s\n", promptText)
+		} else {
+			fmt.Fprintf(os.Stderr, "failed to render chat prompt: %v\n", err)
+		}
+	}
+
+	resp, err := chat.AskLLM(prompt)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "chat error: %v\n", err)
+		return 1
+	}
+
+	fmt.Println(strings.TrimSpace(resp))
+	return 0
 }
 
 // isStaticAsset returns true for requests that should bypass the loading gate

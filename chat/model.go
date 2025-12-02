@@ -66,11 +66,9 @@ func buildFanarMessages(systemPromptText string, prompt *Prompt) []map[string]st
 func buildPromptText(systemPromptText string, prompt *Prompt) string {
 	var sb strings.Builder
 
-	system := strings.TrimSpace(systemPromptText)
-	if system != "" {
-		sb.WriteString(system)
-		sb.WriteString("\n\n")
-	}
+	sb.WriteString("Question: ")
+	sb.WriteString(strings.TrimSpace(prompt.Question))
+	sb.WriteString("\n\n")
 
 	if len(prompt.Context) > 0 {
 		sb.WriteString("Conversation so far:\n")
@@ -91,9 +89,13 @@ func buildPromptText(systemPromptText string, prompt *Prompt) string {
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("User question: ")
-	sb.WriteString(strings.TrimSpace(prompt.Question))
-	sb.WriteString("\nProvide a concise, helpful answer in markdown.")
+	system := strings.TrimSpace(systemPromptText)
+	if system != "" {
+		sb.WriteString(system)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString("Answer (markdown, concise, answer only):")
 
 	return strings.TrimSpace(sb.String())
 }

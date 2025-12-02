@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -17,6 +18,12 @@ type Options struct {
 	// For Mu, default to the repo root.
 	WorkDir string
 
+	// Model sets the Codex model (e.g., "gpt-5.1-codex", "gpt-5.1-codex-max").
+	Model string
+
+	// ReasoningLevel sets the Codex "thinking" effort (e.g., "default", "medium", "high").
+	ReasoningLevel string
+
 	// ExtraArgs lets the caller override things like model, profile, etc.
 	// Usually leave empty and let Codex config decide.
 	ExtraArgs []string
@@ -28,9 +35,11 @@ type Options struct {
 // DefaultOptions provides safe defaults.
 func DefaultOptions() Options {
 	return Options{
-		WorkDir:   ".",
-		ExtraArgs: nil,
-		Timeout:   90 * time.Second,
+		WorkDir:        ".",
+		Model:          "",
+		ReasoningLevel: "",
+		ExtraArgs:      nil,
+		Timeout:        90 * time.Second,
 	}
 }
 
@@ -51,8 +60,9 @@ func Ask(ctx context.Context, prompt string, opt Options) (string, error) {
 		opt.WorkDir = "."
 	}
 
-	if _, err := exec.LookPath("codex"); err != nil {
-		return "", fmt.Errorf("codex binary not found on PATH: %w", err)
+	cmdName, wrapperArgs, err := resolveCodexCommand()
+	if err != nil {
+		return "", err
 	}
 
 	if err := ensureAuth(ctx); err != nil {
@@ -73,7 +83,16 @@ func Ask(ctx context.Context, prompt string, opt Options) (string, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, opt.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "codex", args...)
+	cmdArgs := append(wrapperArgs, args...)
+
+	if opt.Model != "" {
+		cmdArgs = append(cmdArgs, "--model", opt.Model)
+	}
+	if rl := strings.TrimSpace(opt.ReasoningLevel); rl != "" {
+		cmdArgs = append(cmdArgs, "--thinking", rl)
+	}
+
+	cmd := exec.CommandContext(cmdCtx, cmdName, cmdArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -124,7 +143,12 @@ func runCodexCommand(parent context.Context, args ...string) error {
 	ctx, cancel := context.WithTimeout(cmdCtx, 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmdName, wrapperArgs, err := resolveCodexCommand()
+	if err != nil {
+		return err
+	}
+	cmdArgs := append(wrapperArgs, args...)
+	cmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
@@ -134,4 +158,67 @@ func runCodexCommand(parent context.Context, args ...string) error {
 	}
 
 	return nil
+}
+
+// commandName resolves the codex command name (or path) from env override.
+func commandName() string {
+	if v := strings.TrimSpace(os.Getenv("MU_CODEX_CMD")); v != "" {
+		return v
+	}
+	return "codex"
+}
+
+// HasCodex reports whether a codex command is discoverable via PATH or MU_CODEX_CMD.
+func HasCodex() bool {
+	_, _, err := resolveCodexCommand()
+	return err == nil
+}
+
+// resolveCodexCommand finds the command used to invoke Codex.
+// It supports .exe/.cmd/.bat and PowerShell shims (.ps1) by wrapping with pwsh/powershell.
+func resolveCodexCommand() (string, []string, error) {
+	name := commandName()
+
+	// If the env provides a direct path, honor it.
+	if strings.ContainsAny(name, `\/`) {
+		return buildCommand(name)
+	}
+
+	// Try common Windows extensions plus bare name (Unix)
+	paths := []string{
+		name + ".exe",
+		name + ".cmd",
+		name + ".bat",
+		name + ".ps1",
+		name, // last resort (Unix-style shim)
+	}
+
+	for _, candidate := range paths {
+		if p, err := exec.LookPath(candidate); err == nil {
+			return buildCommand(p)
+		}
+	}
+
+	return "", nil, fmt.Errorf("codex binary not found on PATH (tried %q)", strings.Join(paths, ", "))
+}
+
+func buildCommand(path string) (string, []string, error) {
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".ps1") {
+		shell := firstAvailable([]string{"pwsh", "powershell"})
+		if shell == "" {
+			return "", nil, fmt.Errorf("found Codex PowerShell shim at %s but no pwsh/powershell available", path)
+		}
+		return shell, []string{"-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path}, nil
+	}
+	return path, nil, nil
+}
+
+func firstAvailable(names []string) string {
+	for _, n := range names {
+		if _, err := exec.LookPath(n); err == nil {
+			return n
+		}
+	}
+	return ""
 }
