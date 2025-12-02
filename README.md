@@ -4,11 +4,13 @@ Local-first, ad-free personal hub. This fork experiments with a papyrus theme an
 
 <img width="1136" height="863" alt="image" src="https://github.com/user-attachments/assets/78b1ebc1-4c80-4c59-94a2-95bccab98a17" />
 
+Support app author by using the free hosted version at [mu.xyz](https://mu.xyz)
+
 ## Features
 
 - Chat (LLM), Posts, RSS News + markets, Video search, REST API
 - PWA home cards linking to micro apps or external tools
-- Coming soon: Mail, Wallet, Utilities, Services
+- Coming soon: Use with ChatGPT subscription rather than API, Mail, Wallet, Utilities, Services
 
 ## Quick Start
 
